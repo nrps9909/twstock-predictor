@@ -1,0 +1,24 @@
+# OpenClaw Gateway 設定
+model: anthropic/claude-sonnet-4-6
+skills:
+  - stock-sentiment
+  - firecrawl
+
+# API 設定
+api:
+  port: 3000
+  host: localhost
+
+# Firecrawl 設定
+firecrawl:
+  # API key 從環境變數 FIRECRAWL_API_KEY 讀取
+  rateLimit: 10  # 每分鐘請求數
+
+# 排程設定
+schedule:
+  sentiment:
+    cron: "0 18 * * 1-5"  # 週一到週五 18:00 執行
+    stocks:
+      - "2330"
+      - "2317"
+      - "2382"

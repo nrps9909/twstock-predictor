@@ -1,0 +1,25 @@
+{
+  "name": "stock-sentiment",
+  "description": "台股市場情緒分析 — 爬取 PTT、Dcard、鉅亨網等平台的股票相關討論，進行情緒分析",
+  "version": "1.0.0",
+  "triggers": [
+    "分析 * 的市場情緒",
+    "查詢 * 的輿論",
+    "sentiment analysis for *"
+  ],
+  "parameters": {
+    "stock_id": {
+      "type": "string",
+      "description": "台股股票代號（如 2330）",
+      "required": true
+    }
+  },
+  "tools": ["firecrawl"],
+  "output": {
+    "type": "json",
+    "schema": {
+      "articles": "array",
+      "summary": "object"
+    }
+  }
+}

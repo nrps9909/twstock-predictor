@@ -1,0 +1,74 @@
+[project]
+name = "twstock-predictor"
+version = "0.2.0"
+description = "台股走勢預測系統 — 技術分析、社群情緒、ML 預測、自動交易 Agent"
+requires-python = ">=3.12"
+dependencies = [
+    # Data
+    "FinMind>=1.6",
+    "twstock>=1.3",
+    "requests>=2.31",
+
+    # Analysis
+    "pandas>=2.2",
+    "numpy>=1.26",
+    "ta",  # version constrained by FinMind (>=0.5.25,<0.6)
+
+    # ML Core
+    "torch>=2.2",
+    "xgboost>=2.0",
+    "scikit-learn>=1.4",
+
+    # ML Advanced (Tier 2)
+    "pytorch-forecasting>=1.0",
+    "lightning>=2.2",
+    "arch>=7.0",             # GARCH 波動率
+    "hmmlearn>=0.3",         # HMM 市場狀態偵測
+
+    # Database
+    "sqlalchemy>=2.0",
+
+    # Web / API
+    "fastapi>=0.110",
+    "uvicorn>=0.29",
+    "httpx>=0.27",
+    "beautifulsoup4>=4.12",
+
+    # Frontend
+    "streamlit>=1.35",
+    "plotly>=5.22",
+
+    # Agent (Tier 3)
+    "langgraph>=0.2",
+    "anthropic>=0.42",
+
+    # Scheduling & Monitoring (Tier 3)
+    "apscheduler>=3.10",
+
+    # Portfolio Optimization (Tier 3)
+    "cvxpy>=1.5",
+
+    # Utils
+    "python-dotenv>=1.0",
+    "pydantic>=2.7",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+]
+analysis = [
+    "shap>=0.45",            # SHAP 特徵重要性
+]
+notify = [
+    "line-notify>=0.1",
+]
+
+[build-system]
+requires = ["setuptools>=69.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["src*", "app*"]
