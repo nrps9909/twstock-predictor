@@ -1,227 +1,159 @@
 # twstock-predictor
 
-**台股 AI 量化交易系統 v0.2**
+**台股 AI 量化分析系統 v3.0**
 
-> 資料抓取 → Triple Barrier 標籤 → 特徵篩選 → ML 集成預測 → HMM 狀態偵測 → 規則引擎決策 → 硬性風控 → 自動交易
+> 20 因子評分 → HMM 體制偵測 → ML 集成預測 → LLM 敘事 → 硬性風控 → 即時串流
 
-核心原則：**LLM 是研究助手，不是交易員。ML 做預測，規則做風控。**
+核心原則：**演算法做評分，ML 做預測，LLM 做萃取與敘事，規則做風控。**
 
 ---
 
 ## 系統架構
 
 ```
-資料層
-  FinMind API ──→ 日K線、三大法人、融資融券
-  Firecrawl   ──→ PTT 股票板、鉅亨網新聞
-  Claude Haiku ──→ 結構化情緒提取
-        │
-        ▼
-特徵工程（SHAP/MI 篩選 43 → 15-20 維）
-        │
-        ├──→ Triple Barrier 標籤（ATR 動態障礙）
-        │    取代 naive pct_change(5).shift(-5)
-        │
-        ├──→ 樣本唯一性權重（Average Uniqueness）
-        │
-        ▼
-ML 模型層（LSTM + XGBoost + TFT）
-        │
-        ├──→ Purged Walk-Forward CV（purging + embargo）
-        │
-        ├──→ HMM 3-State 狀態偵測 ──→ 動態權重分配
-        │    Bull(1.0x) / Sideways(0.5x) / Bear(0.3x)
-        │
-        ▼
-信號產生（ML 信號 + 信心區間）
-        │
-        ├──→ LLM Agent（情緒分析 + 多空辯論）← 僅供參考，佔 30%
-        │
-        ▼
-規則引擎決策（ML 信號 70% + Agent 建議 30%）
-        │
-        ├──→ 硬性風控（LLM 無法覆蓋）
-        │        ├── 1/4 Kelly 倉位上限
-        │        ├── ATR Trailing Stop（追蹤停損）
-        │        ├── 最大回撤 15% 熔斷
-        │        └── 倉位 / 停損 / 風險報酬比限制
-        │
-        ▼
-執行 + 即時監控 + 記憶回饋
+┌──────────────────────────────────────────────────────┐
+│          Phase 1: 數據收集 (並行)                      │
+│  ├─ 股票 OHLCV + 三大法人 (T86/DB)                    │
+│  ├─ 技術指標 (TechnicalAnalyzer)                      │
+│  ├─ 月營收 (FinMind)                                  │
+│  ├─ 全球市場 (yfinance: SOX, TSM, EWT)                │
+│  ├─ 總經數據 (yfinance: VIX, USD/TWD, TNX, XLI, SPY) │
+│  └─ 新聞/情緒原始資料 (DB)                             │
+└─────────────────────┬────────────────────────────────┘
+                      │
+┌─────────────────────▼────────────────────────────────┐
+│          Phase 2: 特徵萃取 (並行)                      │
+│  ├─ 20 因子計算 (全部演算法，score 0-1)                 │
+│  ├─ HMM 3-state 體制偵測 → regime 權重                 │
+│  ├─ ML 模型預測 (LSTM + XGBoost)                      │
+│  └─ LLM 情緒萃取 (Claude Haiku，1 次呼叫)              │
+└─────────────────────┬────────────────────────────────┘
+                      │
+┌─────────────────────▼────────────────────────────────┐
+│          Phase 3: 多因子評分                            │
+│  ├─ HMM 體制調整因子權重 (REGIME_MULTIPLIERS)           │
+│  ├─ 加權評分: total_score = Σ(factor × weight)         │
+│  ├─ 信號判定: strong_buy/buy/hold/sell/strong_sell     │
+│  └─ 信心度 = agreement × strength × coverage           │
+│              × freshness × risk_discount               │
+└─────────────────────┬────────────────────────────────┘
+                      │
+┌─────────────────────▼────────────────────────────────┐
+│          Phase 4: LLM 敘事生成 (Claude Sonnet)          │
+│  ├─ 輸入: 因子分數 + regime + ML 預測 + 情緒           │
+│  └─ 輸出: 展望 / 驅動因子 / 風險 / 催化劑 / 關鍵價位   │
+│  └─ Fallback: 演算法推理 (LLM 不可用時)                 │
+└─────────────────────┬────────────────────────────────┘
+                      │
+┌─────────────────────▼────────────────────────────────┐
+│          Phase 5: 風險控制 + 部位建議                    │
+│  ├─ 信號 → 行動映射 + 部位大小 (0-20%)                 │
+│  ├─ 迴路斷路器 (drawdown > 15%)                        │
+│  ├─ ATR 追蹤止損                                       │
+│  └─ 體制轉換減倉 (bull→bear: 強制減倉)                  │
+└─────────────────────┬────────────────────────────────┘
+                      │
+┌─────────────────────▼────────────────────────────────┐
+│          Phase 6: 儲存 + 警報                           │
+│  ├─ 存入 DB (MarketScanResult + PipelineResult)        │
+│  ├─ 警報生成 (signal_change, strong_signal, etc.)      │
+│  └─ SSE 串流完成事件                                    │
+└──────────────────────────────────────────────────────┘
 ```
+
+### LLM 使用策略
+
+| 用途 | 模型 | 呼叫次數 |
+|------|------|---------|
+| 情緒特徵萃取 | Claude Haiku | 1 次 |
+| 敘事生成 | Claude Sonnet | 1 次 |
+| **總計** | | **2 次** |
+
+技術分析、籌碼分析全部由演算法（20 因子系統）完成——比 LLM 更準確、更快、更可靠。
 
 ---
 
-## 核心模組
+## 20 因子評分引擎
 
-### 1. 資料抓取 (`src/data/`)
+短期因子 (39%):
+| 因子 | 權重 | 數據來源 |
+|------|------|---------|
+| foreign_flow | 11% | T86 三大法人 |
+| technical_signal | 8% | RSI/KD/MACD/均線 |
+| short_momentum | 7% | 5日動量 |
+| trust_flow | 5% | 投信買賣超 |
+| volume_anomaly | 4% | 量比 |
+| margin_sentiment | 4% | 融資融券 |
 
-| 模組 | 來源 | 內容 |
-|------|------|------|
-| `stock_fetcher.py` | FinMind API | 日K線 OHLCV、三大法人買賣超、融資融券 |
-| `sentiment_crawler.py` | PTT、鉅亨網 | 社群文章、新聞標題 |
-| `news_crawler.py` | 鉅亨網、工商、經濟日報 | 財經新聞 |
+中期因子 (32%):
+| 因子 | 權重 | 數據來源 |
+|------|------|---------|
+| trend_momentum | 7% | 20日趨勢 |
+| revenue_momentum | 4% | FinMind 月營收 |
+| institutional_sync | 4% | 外資+投信同步 |
+| volatility_regime | 4% | 波動率 |
+| news_sentiment | 3% | LLM 情緒萃取 |
+| global_context | 3% | SOX/TSM/EWT |
+| margin_quality | 4% | yfinance 季財報 |
+| sector_rotation | 3% | 產業輪動 |
 
-- 指數退避重試（1s → 2s → 4s），區分暫時性 / 永久性錯誤
-- Token Bucket 速率限制
-- 情緒提取優先 Claude Haiku，regex 做 fallback
+長期因子 (29%):
+| 因子 | 權重 | 數據來源 |
+|------|------|---------|
+| ml_ensemble | 7% | LSTM+XGBoost |
+| fundamental_value | 6% | P/E + 營收 |
+| liquidity_quality | 4% | 流動性 |
+| macro_risk | 4% | VIX/匯率/利率 |
+| export_momentum | 4% | EWT ETF |
+| us_manufacturing | 4% | XLI/SPY |
 
-### 2. 特徵工程 (`src/analysis/`)
+HMM 3-state 體制偵測動態調整所有因子權重：
+- **Bull**: 短期因子加權，積極交易
+- **Sideways**: 均衡權重
+- **Bear**: 長期因子加權，保守避險
 
-**43 維原始特徵：**
+---
 
-```
-價格 (8)     │ close, open, high, low, volume, return_1d/5d/20d
-技術 (17)    │ SMA(5/20/60), RSI, KD, MACD, BIAS, BB, OBV, ADX
-情緒 (5)     │ sentiment_score, sentiment_ma5, change, post_volume, bullish_ratio
-籌碼 (5)     │ foreign/trust/dealer_buy_sell, margin/short_balance
-波動率 (3)   │ realized_vol_5d/20d, Parkinson high-low vol
-微結構 (2)   │ volume_ratio_5d, spread_proxy
-日曆 (3)     │ day_of_week, month, is_settlement
-```
-
-**特徵篩選（43 → 15-20 維）：**
-
-- **Mutual Information** — 預設方法，衡量特徵與 target 的非線性相關
-- **SHAP** — 基於輕量 XGBoost 的 Shapley 重要性（需安裝 `shap`）
-- 自動移除相關係數 > 0.95 的共線特徵
-
-**Triple Barrier 標籤** (`src/analysis/labels.py`)：
-
-取代 naive `pct_change(5).shift(-5)`，三重障礙同時設定止盈、停損、到期：
-
-| 障礙 | 觸發條件 | 標籤 |
-|------|---------|------|
-| 上障礙 | 價格觸及 entry + ATR × multiplier | 正報酬率 |
-| 下障礙 | 價格觸及 entry - ATR × multiplier | 負報酬率 |
-| 時間障礙 | max_holding 天後未觸及任何障礙 | 到期時實際報酬率 |
-
-搭配 **樣本唯一性權重**（Average Uniqueness）傳入 XGBoost `sample_weight`，降低重疊標籤的影響。
-
-### 3. ML 模型層 (`src/models/`)
+## ML 模型
 
 | 模型 | 擅長 | 架構 |
 |------|------|------|
-| LSTM + Attention | 時間序列長期依賴 | 雙層 LSTM → Temporal Attention → FC |
-| XGBoost | 表格特徵、缺失值穩健 | 500 樹 / depth=6 / L1+L2 正則 / 樣本權重 |
-| TFT | 多步預測、特徵自動選擇 | Temporal Fusion Transformer |
+| LSTM + Attention | 時間序列依賴 | 雙層 LSTM → Temporal Attention → FC |
+| XGBoost | 表格特徵 | 500 樹 / depth=6 / L1+L2 / 樣本權重 |
+| TFT (選配) | 多步預測 | Temporal Fusion Transformer |
 
-**集成策略：**
-- Weighted Ensemble（inverse MSE 動態權重）
-- Stacking Ensemble（Ridge 做 meta-learner）
-- 幾何複利 `np.cumprod(1+r)` + Log-space 信心區間
+- **Triple Barrier 標籤** (ATR-based 動態障礙)
+- **PurgedTimeSeriesSplit + CPCV** 防止前看偏誤
+- **Stacking Ensemble** (Ridge meta-learner)
+- **Meta-Labeling** (GBM) 校準信心度
 
-**Purged Walk-Forward CV** (`PurgedTimeSeriesSplit`)：
+---
 
-```
-Train ─────────── [purge] [embargo] ── Test ──────
-                   10 days   5 days
-
-purge: 移除訓練集末尾與測試集標籤重疊的樣本（≥ max_holding）
-embargo: purge 後額外安全間隔，防止序列相關洩漏
-```
-
-**HMM 市場狀態偵測** (`HMMStateDetector`)：
-
-3-state Gaussian HMM，觀測 [daily_return, realized_volatility]：
-
-| 狀態 | 信號縮放 | 行為 |
-|------|---------|------|
-| Bull（牛市） | × 1.0 | 正常執行信號 |
-| Sideways（盤整） | × 0.5 | 信號強度減半 |
-| Bear（熊市） | × 0.3 | 大幅降低信號，低強度 buy → hold |
-
-核心價值：**告訴你何時不要交易**。
-
-### 4. Multi-Agent 決策層 (`src/agents/`)
-
-參考 [TradingAgents](https://arxiv.org/abs/2412.20138) + [FinMem](https://arxiv.org/abs/2311.11340) (AAAI 2024)。
-
-**架構改進：LLM Agent 降級為「顧問」角色。**
-
-```
-Phase 1（並行）：4 個分析師 Agent 提供觀點
-    ├── 技術面 Agent (Claude Haiku)  → RSI、MACD、均線解讀
-    ├── 情緒面 Agent (Claude Sonnet) → PTT 輿論、新聞風向
-    ├── 基本面 Agent (Claude Haiku)  → 法人動向、融資融券
-    └── 量化面 Agent (無 LLM)        → ML 模型預測彙整
-
-Phase 2：研究員 Agent (Claude Sonnet) — 僅供參考
-    → Bull vs Bear 多空辯論 → 綜合建議
-
-Phase 3：規則引擎決策（取代 LLM 直接決策）
-    → ML 信號 × 70% + Agent 建議 × 30%
-    → HMM 市場狀態調整
-    → 閾值決策: > 0.25 → buy / < -0.25 → sell / else → hold
-
-Phase 4：硬性風控（LLM 無法覆蓋）
-    → 熔斷檢查 → 倉位限制 → Trailing Stop → 風險報酬比
-
-Phase 5：記憶更新 + 層級轉移
-```
-
-**為什麼降級 LLM？**
-
-| 論文 | 結論 |
-|------|------|
-| FINSABER (KDD 2026) | LLM 策略優勢在更廣泛股票和更長期限下完全消失 |
-| TradeTrap (2025) | LLM agent 記憶攻擊成功率 77.97% |
-| StockBench (2025) | 最好的 LLM agent 僅比 buy-and-hold 多賺 1.9% |
-
-### 5. 風控層 (`src/risk/`)
-
-**硬性風控（LLM 無法覆蓋）：**
+## 風控系統
 
 | 規則 | 限制 | 說明 |
 |------|------|------|
-| 最大單一倉位 | 20% | 任何來源都不可超過 |
-| 最多持倉數 | 5 檔 | |
+| 最大單一倉位 | 20% | 硬性上限 |
+| 最大回撤熔斷 | 15% | 觸發後禁止交易 |
+| ATR Trailing Stop | 2.5×ATR | 只升不降 |
+| 體制轉換減倉 | 自動 | bull→bear 強制減倉 |
 | 停損幅度 | ≤ 8% | |
 | 風險報酬比 | ≥ 2:1 | |
-| Kelly 倉位 | 1/4 Kelly | 保守版 Kelly criterion |
-| 最大回撤熔斷 | 15% | 觸發後禁止一切買入，需手動重置 |
 
-**ATR Trailing Stop（追蹤停損）：**
+---
 
-```
-進場 → 設定初始停損 = entry - 2.5 × ATR
-       │
-       ├→ 價格上漲 → 停損跟隨上移（只升不降）
-       │              new_stop = highest - 2.5 × ATR
-       │
-       └→ 價格跌破停損 → 觸發出場，禁止加倉
-```
+## 技術棧
 
-**記憶層級轉移（FinMem 升級）：**
-
-| 條件 | 動作 |
+| 類別 | 技術 |
 |------|------|
-| 勝率 ≥ 60%（3+ 筆） | 短期記憶模式 → 升級到長期記憶 |
-| 連續虧損 3 次 | 相關模式標記為不可靠，降低參考權重 |
-
-### 6. 回測引擎 (`src/backtest/`)
-
-- 事件驅動，含滑價 + 台股交易成本（手續費 0.1425% × 2.8 折 + 證交稅 0.3%）
-- 績效指標：Sharpe ratio、最大回撤、勝率、獲利因子、月報酬、權益曲線
-
-### 7. 即時排程 (`src/pipeline/`)
-
-| 時間 | 任務 |
-|------|------|
-| 08:30 盤前 | 資料更新 + Agent 分析 → 推播通知 |
-| 09:00–13:30 盤中 | 每 30 分鐘監控 Trailing Stop / 止盈 |
-| 14:00 盤後 | 結算、記憶層級轉移 |
-| 20:00 晚間 | 情緒爬蟲、模型再訓練 |
-
-### 8. 前端 (`app/`)
-
-Streamlit 三頁式儀表板：
-
-| 頁面 | 功能 |
-|------|------|
-| 技術分析 | K 線圖 + 技術指標 + 買賣訊號 |
-| 情緒分析 | PTT/新聞情緒趨勢 + 籌碼分析 |
-| 走勢預測 | ML 預測 + 信心區間 + Agent 辯論 + 回測 |
+| 後端 | FastAPI + uvicorn (SSE 串流) |
+| 前端 | Next.js 15 + TailwindCSS + Recharts |
+| ML | PyTorch, XGBoost, scikit-learn, hmmlearn |
+| LLM | Anthropic Claude (Haiku + Sonnet) |
+| 資料 | FinMind API, yfinance, TWSE T86 API |
+| 資料庫 | SQLAlchemy 2.x + SQLite |
+| 排程 | APScheduler (15:00 掃描, 15:30 管線, 16:00 IC) |
+| 最佳化 | CVXPY (Mean-Variance) |
 
 ---
 
@@ -229,23 +161,22 @@ Streamlit 三頁式儀表板：
 
 ### 環境需求
 
-- Python ≥ 3.12
-- 約 2GB 磁碟空間（PyTorch + 依賴）
+- Python >= 3.12
+- Node.js >= 18 (前端)
 
 ### 安裝
 
 ```bash
-git clone https://github.com/your-username/twstock-predictor.git
+git clone https://github.com/nrps9909/twstock-predictor.git
 cd twstock-predictor
 
-# 建議使用 uv 管理
+# Python (uv 或 pip)
 uv sync
-
-# 或 pip
+# 或
 pip install -e .
 
-# 可選：SHAP 特徵重要性分析
-pip install -e ".[analysis]"
+# 前端
+cd web && npm install && cd ..
 ```
 
 ### 設定
@@ -254,80 +185,37 @@ pip install -e ".[analysis]"
 cp .env.example .env
 ```
 
-編輯 `.env`：
-
 ```env
 # 必要
-FINMIND_TOKEN=       # 免費註冊: https://finmindtrade.com/
+FINMIND_TOKEN=       # https://finmindtrade.com/
 ANTHROPIC_API_KEY=   # Claude API
 
 # 選填
-FIRECRAWL_API_KEY=   # 新聞爬蟲
-OPENAI_API_KEY=      # Embedding fallback
 DATABASE_URL=sqlite:///./data/twstock.db
 ```
 
 ### 啟動
 
 ```bash
+# 方法 1: 一鍵啟動 (Windows)
+start_dev.bat
+
+# 方法 2: 手動
+# 後端 API
+uvicorn api.main:app --reload --port 8000
+
 # 前端
-streamlit run app/main.py
+cd web && npm run dev
 
-# 即時管線（含排程）
-python -m src.pipeline.realtime
+# Streamlit (舊版前端)
+streamlit run app/main.py --server.port 8501
 ```
 
-### 訓練模型
+### 測試
 
-```python
-from src.models.trainer import ModelTrainer
-
-trainer = ModelTrainer(stock_id="2330")
-
-# 完整訓練（Triple Barrier + 特徵篩選 + HMM）
-results = trainer.train(
-    start_date="2022-01-01",
-    end_date="2025-12-31",
-    use_triple_barrier=True,       # Triple Barrier 標籤
-    max_features=20,               # 特徵篩選至 20 維
-    feature_selection_method="mutual_info",
-)
-
-# Purged Walk-Forward 驗證
-cv_results = trainer.walk_forward_validate(
-    start_date="2022-01-01",
-    end_date="2025-12-31",
-    n_splits=5,
-    purge_days=10,     # >= max_holding
-    embargo_days=5,
-)
-
-# 預測（含 HMM 狀態偵測）
-prediction = trainer.predict(
-    start_date="2025-10-01",
-    end_date="2025-12-31",
-)
-print(prediction.signal, prediction.signal_strength)
-print(prediction.market_state)  # HMM 狀態
+```bash
+.venv/Scripts/python -m pytest tests/ -v
 ```
-
----
-
-## 技術棧
-
-| 類別 | 技術 |
-|------|------|
-| ML | PyTorch 2.2+, XGBoost 2.0+, scikit-learn 1.4+, pytorch-forecasting |
-| 市場狀態 | hmmlearn 0.3+ (Gaussian HMM) |
-| 波動率 | arch 7.0+ (GARCH) |
-| LLM | Anthropic Claude (Haiku 快速 / Sonnet 深度) |
-| Agent 編排 | LangGraph 0.2+, 自建 async Agent 框架 |
-| 資料 | FinMind API, Firecrawl, pandas 2.2+ |
-| 資料庫 | SQLAlchemy 2.0+ / SQLite (6 張表) |
-| 前端 | Streamlit 1.35+ / Plotly 5.22+ |
-| 排程 | APScheduler 3.10+ |
-| 通知 | LINE Notify, Telegram Bot |
-| 最佳化 | CVXPY 1.5+ (Mean-Variance) |
 
 ---
 
@@ -335,51 +223,68 @@ print(prediction.market_state)  # HMM 狀態
 
 ```
 twstock-predictor/
-├── app/                          # Streamlit 前端
-│   ├── main.py                   #   入口
-│   ├── pages/                    #   三頁式 UI
-│   └── components/               #   圖表、側邊欄元件
-├── src/                          # 核心邏輯
-│   ├── analysis/                 # 特徵工程
-│   │   ├── features.py           #   43 維特徵 + SHAP/MI 篩選
-│   │   ├── labels.py             #   Triple Barrier 標籤 + 樣本權重
-│   │   ├── technical.py          #   17 種技術指標
-│   │   ├── sentiment.py          #   情緒分析
-│   │   └── llm_features.py       #   LLM Embedding + PCA 降維
-│   ├── models/                   # ML 模型
-│   │   ├── lstm_model.py         #   LSTM + Attention
-│   │   ├── xgboost_model.py      #   XGBoost（含樣本權重）
-│   │   ├── tft_model.py          #   Temporal Fusion Transformer
-│   │   ├── ensemble.py           #   集成預測 + HMM 狀態偵測
-│   │   ├── trainer.py            #   訓練管線 + Purged Walk-Forward CV
-│   │   ├── backtester.py         #   回測引擎
-│   │   └── data_module.py        #   PyTorch DataLoader
-│   ├── agents/                   # Multi-Agent 系統
-│   │   ├── orchestrator.py       #   DAG 編排 + 規則引擎 (70/30)
-│   │   ├── researcher_agent.py   #   多空辯論（Claude Sonnet）
-│   │   ├── trader_agent.py       #   交易建議（降級為顧問）
-│   │   ├── risk_agent.py         #   風控規則
-│   │   ├── memory.py             #   三層記憶 + 層級轉移
-│   │   ├── technical_agent.py    #   技術面觀點
-│   │   ├── sentiment_agent.py    #   情緒面觀點
-│   │   ├── fundamental_agent.py  #   基本面觀點
-│   │   ├── quant_agent.py        #   量化面觀點
-│   │   └── base.py               #   基礎類別 + 資料結構
-│   ├── risk/                     # 風險管理
-│   │   ├── manager.py            #   Kelly / ATR Trailing Stop / 熔斷
-│   │   └── portfolio.py          #   多檔持倉追蹤
-│   ├── data/                     # 資料抓取
-│   ├── db/                       # SQLAlchemy ORM (6 張表)
-│   ├── backtest/                 # 回測框架
-│   ├── pipeline/                 # APScheduler 即時管線
-│   ├── portfolio/                # Mean-Variance 最佳化
-│   ├── monitoring/               # LINE / Telegram 通知
-│   └── utils/                    # 設定、常數、重試
-├── models/                       # 訓練好的模型檔
-├── data/                         # SQLite 資料庫
-├── .env.example                  # 環境變數範本
-└── pyproject.toml                # 依賴定義
+├── api/                           # FastAPI 後端
+│   ├── main.py                    #   入口 + 排程
+│   ├── routers/                   #   10 個 API 端點
+│   │   ├── market.py              #   市場掃描/分析/推薦/管線
+│   │   ├── alerts.py              #   警報系統
+│   │   └── ...                    #   其他端點
+│   └── services/                  #   業務邏輯
+│       ├── stock_analysis_service.py  # 統一 6 階段管線
+│       ├── market_service.py      #   20 因子評分引擎
+│       ├── auto_pipeline_service.py   # 每日自動管線
+│       ├── alert_service.py       #   警報生成 (5 類型)
+│       └── market_intel_service.py    # 市場情報
+├── web/                           # Next.js 前端
+│   ├── app/                       #   頁面 (市場/歷史)
+│   └── components/                #   分析/圖表/佈局元件
+├── src/                           # 核心邏輯
+│   ├── agents/                    #   Agent 系統
+│   │   ├── narrative_agent.py     #   LLM 情緒萃取 + 敘事生成
+│   │   ├── orchestrator.py        #   管線入口 (向後相容)
+│   │   ├── risk_agent.py          #   風控規則
+│   │   └── base.py                #   基礎類別
+│   ├── analysis/                  #   特徵工程
+│   │   ├── features.py            #   43 維特徵 + SHAP/MI 篩選
+│   │   ├── labels.py              #   Triple Barrier 標籤
+│   │   ├── technical.py           #   技術指標
+│   │   └── drift.py               #   PSI 特徵漂移偵測
+│   ├── models/                    #   ML 模型
+│   │   ├── ensemble.py            #   集成預測 + HMM 偵測
+│   │   ├── trainer.py             #   訓練管線
+│   │   ├── meta_label.py          #   Meta-labeling
+│   │   └── cpcv.py                #   CPCV 交叉驗證
+│   ├── risk/                      #   風險管理
+│   │   └── manager.py             #   ATR Stop + 熔斷
+│   ├── data/                      #   資料抓取
+│   │   ├── twse_scanner.py        #   T86 三大法人
+│   │   └── sentiment_crawler.py   #   PTT/新聞爬蟲
+│   ├── db/                        #   SQLAlchemy ORM
+│   ├── pipeline/                  #   排程 + 自動重訓練
+│   └── monitoring/                #   週報/月報
+├── tests/                         # 200+ 測試
+├── models/                        # 模型檔 (.pt/.json)
+├── data/                          # SQLite DB
+└── docs/                          # 架構文件
+    └── architecture.md            # 詳細架構說明
 ```
+
+---
+
+## API 端點
+
+| 方法 | 路徑 | 說明 |
+|------|------|------|
+| GET | `/api/market/scan` | 市場掃描 (SSE 串流) |
+| GET | `/api/market/overview` | 市場總覽 |
+| GET | `/api/market/recommendations` | 推薦排名 |
+| POST | `/api/market/analyze/{stock_id}` | 個股深度分析 (SSE) |
+| GET | `/api/market/pipeline` | 管線結果查詢 |
+| POST | `/api/market/pipeline/{stock_id}` | 觸發管線 |
+| POST | `/api/market/pipeline/batch` | 批次管線 |
+| GET | `/api/market/intel/*` | 市場情報 |
+| GET | `/api/market/factor-ic` | 因子 IC 追蹤 |
+| GET/POST | `/api/alerts/*` | 警報管理 |
 
 ---
 
@@ -387,82 +292,62 @@ twstock-predictor/
 
 | 表 | 用途 |
 |----|------|
-| `StockPrice` | 日 K 線 OHLCV + 三大法人 + 融資融券 |
-| `SentimentRecord` | 社群情緒（來源、標題、分數、關鍵字） |
-| `Prediction` | ML 預測記錄（含信心區間） |
-| `BacktestResult` | Walk-Forward 回測結果 |
-| `AgentMemory` | 三層記憶（短期/長期 + embedding） |
-| `TradeJournal` | 交易日誌（完整推理鏈 + 事後檢討） |
+| `StockPrice` | OHLCV + 三大法人 + 融資融券 (as_of_date) |
+| `SentimentRecord` | 新聞/PTT 情緒 (as_of_date) |
+| `MarketScanResult` | 掃描結果 + 20 因子 + 信心度 |
+| `PipelineResult` | 管線分析完整結果 |
+| `FactorICRecord` | 因子 IC 追蹤 (Spearman) |
+| `Alert` | 警報 (5 類型, 3 嚴重度) |
+| `Prediction` | ML 預測記錄 |
+| `AgentMemory` | Agent 記憶 |
+| `DelistedStock` | 下市股票 (防存活偏誤) |
 
 ---
 
-## 設計決策與研究基礎
+## 設計決策
 
-### 為什麼不讓 LLM 直接做交易決策？
+### 為什麼統一管線取代多 Agent 辯論？
+
+| 原架構 | 問題 |
+|--------|------|
+| 4 個 LLM Agent 平行分析 | 6-8 次 LLM 呼叫，成本高、延遲大 |
+| 多輪 Bull/Bear 辯論 | LLM 對技術/籌碼分析不如演算法 |
+| 雙軌信號系統 | Pipeline vs Scan 可能矛盾 |
+
+| 新架構 | 改進 |
+|--------|------|
+| 20 因子演算法評分 | 客觀、快速、可回測 |
+| 2 次 LLM 呼叫 | 成本降 70%，延遲降 60% |
+| 單一管線 | 一致的信號系統 |
+
+### 研究基礎
 
 | 研究 | 發現 |
 |------|------|
-| FINSABER (KDD 2026, arXiv 2505.07078) | 20 年回測：LLM 優勢在更廣泛股票和更長期限下**完全消失** |
-| StockBench (arXiv 2510.02209) | 最好的 LLM agent 僅比 buy-and-hold 多賺 1.9% |
-| TradeTrap (arXiv 2512.02261) | LLM agent 記憶攻擊成功率 77.97% |
-| 2026 偏誤審查 (arXiv 2602.14233) | 164 篇論文中沒有任何一種偏誤被超過 28% 的論文討論 |
+| FINSABER (KDD 2026) | LLM 策略優勢在長期回測中消失 |
+| StockBench (2025) | 最好的 LLM agent 僅比 buy-and-hold 多 1.9% |
+| TradeTrap (2025) | LLM agent 記憶攻擊成功率 77.97% |
 
-> "LLMs are NOT great at inventing alpha — they remove friction around the work that surrounds it."
-> — Ilya Navogitsyn, Dataconomy 2026
-
-### 為什麼用 HMM？
-
-多項獨立研究驗證 HMM 狀態切換的價值：
-- Sharpe 從 0.67 → 1.05（NIFTY 50, 2018-2024）
-- 核心價值：告訴你**何時不要交易**
-
-### 為什麼用 Triple Barrier？
-
-- Marcos López de Prado, *Advances in Financial Machine Learning* (2018)
-- 自適應市場波動率（ATR-based 動態障礙）
-- 搭配 Purged CV 才能產生可信的回測結果
-
-### 實際績效期望
-
-- 散戶 AI 系統實盤 Sharpe：**0.8 – 1.5**
-- 超過 2.0 幾乎確定是過擬合
-- 實盤表現通常比回測降 30-50%
-
----
-
-## 開發
-
-```bash
-# 安裝開發依賴
-pip install -e ".[dev]"
-
-# 測試
-pytest tests/
-
-# 型別檢查（選用）
-mypy src/
-```
+> LLM 適合做特徵萃取和可解釋性報告，不適合直接做交易決策。
 
 ---
 
 ## 支援的股票
 
-預設追蹤台股前 10 大權值股：
+預設追蹤 ~80 支台股，涵蓋 8 個產業：
 
-| 代碼 | 名稱 |
+| 產業 | 代表 |
 |------|------|
-| 2330 | 台積電 |
-| 2317 | 鴻海 |
-| 2382 | 廣達 |
-| 2454 | 聯發科 |
-| 2881 | 富邦金 |
-| 2882 | 國泰金 |
-| 2303 | 聯電 |
-| 3711 | 日月光投控 |
-| 2308 | 台達電 |
-| 2412 | 中華電 |
+| 半導體 | 2330 台積電, 2454 聯發科, 3711 日月光 |
+| 電子 | 2317 鴻海, 2382 廣達, 2308 台達電 |
+| 金融 | 2881 富邦金, 2882 國泰金, 2886 兆豐金 |
+| 電信 | 2412 中華電, 3045 台灣大 |
+| 傳產 | 1301 台塑, 2002 中鋼 |
+| 航運 | 2603 長榮, 2609 陽明 |
+| 生技 | 6446 藥華藥, 4743 合一 |
+| 綠能 | 6669 緯穎, 3661 世芯-KY |
 
-可在 `src/utils/constants.py` 中新增。
+可在 `api/services/market_service.py` 的 `STOCK_SECTOR` 中新增。
 
 ---
 

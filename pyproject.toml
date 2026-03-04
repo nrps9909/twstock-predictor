@@ -1,7 +1,7 @@
 [project]
 name = "twstock-predictor"
-version = "0.2.0"
-description = "台股走勢預測系統 — 技術分析、社群情緒、ML 預測、自動交易 Agent"
+version = "3.0.0"
+description = "台股 AI 量化分析系統 — 20 因子評分 + HMM 體制偵測 + ML 集成 + LLM 敘事 + 風控"
 requires-python = ">=3.12"
 dependencies = [
     # Data
