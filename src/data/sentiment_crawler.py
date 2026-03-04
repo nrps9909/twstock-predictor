@@ -1,18 +1,21 @@
 """社群情緒資料收集 — httpx 直接爬取優先，Firecrawl 作為可選 fallback
 
 Bug 6 fix: 優先用 LLM 結構化提取（Claude Haiku），regex 作為 fallback
-免費方案：PTT 用 httpx + cookie，鉅亨網用公開 JSON API
+免費方案：PTT 用 httpx + cookie，鉅亨網用公開 JSON API，Google News RSS，Yahoo TW
 """
 
 import json
 import logging
+import xml.etree.ElementTree as ET
 from datetime import date, datetime
+from html import unescape
 
 import httpx
 from bs4 import BeautifulSoup
 
 from src.utils.config import settings
 from src.utils.constants import SENTIMENT_SOURCES, STOCK_LIST
+from src.utils.llm_client import call_claude_sync, parse_json_response
 from src.utils.retry import retry_with_backoff
 
 logger = logging.getLogger(__name__)
@@ -113,14 +116,11 @@ class SentimentCrawler:
     # ── LLM 結構化提取 ─────────────────────────────────
 
     def _extract_with_llm(self, content: str, stock_id: str) -> list[dict]:
-        """Bug 6 fix: 用 Claude Haiku 結構化提取文章與情緒
+        """Bug 6 fix: 用 Claude Haiku 結構化提取文章與情緒（透過 claude -p CLI）
 
         Returns:
             list of {title, sentiment, engagement, date_str}
         """
-        if not self.anthropic_key:
-            return []
-
         stock_name = STOCK_LIST.get(stock_id, stock_id)
         prompt = f"""從以下網頁內容中提取與股票 {stock_id} ({stock_name}) 相關的文章。
 
@@ -139,30 +139,8 @@ class SentimentCrawler:
 {content[:4000]}"""
 
         try:
-            resp = self.client.post(
-                "https://api.anthropic.com/v1/messages",
-                headers={
-                    "x-api-key": self.anthropic_key,
-                    "anthropic-version": "2023-06-01",
-                    "content-type": "application/json",
-                },
-                json={
-                    "model": "claude-haiku-4-5-20251001",
-                    "max_tokens": 1024,
-                    "messages": [{"role": "user", "content": prompt}],
-                },
-                timeout=30,
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            text = data["content"][0]["text"].strip()
-
-            # Parse JSON from response
-            if text.startswith("```"):
-                text = text.split("```")[1]
-                if text.startswith("json"):
-                    text = text[4:]
-            return json.loads(text)
+            text = call_claude_sync(prompt, model="claude-haiku-4-5-20251001", timeout=90)
+            return parse_json_response(text)
         except Exception as e:
             logger.warning("LLM 提取失敗，將使用 regex fallback: %s", e)
             return []
@@ -330,6 +308,128 @@ class SentimentCrawler:
             })
         return articles
 
+    # ── Google News RSS 爬蟲 ────────────────────────────
+
+    @retry_with_backoff(max_retries=2, base_delay=1.0)
+    def crawl_google_news(self, stock_id: str) -> list[dict]:
+        """透過 Google News RSS 取得相關新聞（免費、無需 API key）"""
+        stock_name = STOCK_LIST.get(stock_id, stock_id)
+        query = f"{stock_id} {stock_name}"
+        rss_url = f"https://news.google.com/rss/search?q={query}&hl=zh-TW&gl=TW&ceid=TW:zh-Hant"
+
+        try:
+            resp = self.client.get(rss_url)
+            resp.raise_for_status()
+        except Exception as e:
+            logger.warning("Google News RSS 抓取失敗: %s", e)
+            return []
+
+        articles = []
+        try:
+            root = ET.fromstring(resp.text)
+            items = root.findall(".//item")
+            for item in items[:20]:
+                title_el = item.find("title")
+                pub_date_el = item.find("pubDate")
+                title = unescape(title_el.text) if title_el is not None and title_el.text else ""
+                if not title:
+                    continue
+
+                news_date = date.today()
+                if pub_date_el is not None and pub_date_el.text:
+                    try:
+                        dt = datetime.strptime(pub_date_el.text[:25].strip(), "%a, %d %b %Y %H:%M:%S")
+                        news_date = dt.date()
+                    except (ValueError, TypeError):
+                        pass
+
+                articles.append({
+                    "stock_id": stock_id,
+                    "source": "google_news",
+                    "title": title[:200],
+                    "sentiment_label": "neutral",
+                    "date": news_date,
+                    "engagement": 0,
+                })
+        except ET.ParseError as e:
+            logger.warning("Google News RSS XML 解析失敗: %s", e)
+
+        return articles
+
+    # ── Yahoo Finance TW 爬蟲 ─────────────────────────
+
+    @retry_with_backoff(max_retries=2, base_delay=1.0)
+    def crawl_yahoo_tw(self, stock_id: str) -> list[dict]:
+        """爬取 Yahoo Finance TW 個股新聞"""
+        url = f"https://tw.stock.yahoo.com/quote/{stock_id}.TW/news"
+
+        content = self._scrape_with_fallback(url)
+        if not content:
+            return []
+
+        # 優先使用 LLM 結構化提取
+        llm_results = self._extract_with_llm(content, stock_id)
+        if llm_results:
+            articles = []
+            for item in llm_results:
+                articles.append({
+                    "stock_id": stock_id,
+                    "source": "yahoo_tw",
+                    "title": item.get("title", ""),
+                    "sentiment_label": item.get("sentiment", "neutral"),
+                    "date": date.today(),
+                    "engagement": item.get("engagement", 0),
+                })
+            return articles
+
+        # Fallback: 關鍵字匹配
+        stock_name = STOCK_LIST.get(stock_id, "")
+        articles = []
+        for line in content.split("\n"):
+            line = line.strip()
+            if len(line) > 10 and any(kw in line for kw in [stock_id, stock_name]):
+                articles.append({
+                    "stock_id": stock_id,
+                    "source": "yahoo_tw",
+                    "title": line[:200],
+                    "sentiment_label": "neutral",
+                    "date": date.today(),
+                    "engagement": 0,
+                })
+        return articles[:15]
+
+    # ── 全球半導體/宏觀 context ──────────────────────
+
+    @retry_with_backoff(max_retries=2, base_delay=1.0)
+    def crawl_global_context(self, stock_id: str) -> list[str]:
+        """抓取半導體/AI/宏觀新聞標題，供 LLM 分析全球 context
+
+        Returns:
+            list of headline strings (English + Chinese)
+        """
+        queries = [
+            "semiconductor+AI+chip",
+            "TSMC+台積電",
+            "Fed+interest+rate+economy",
+        ]
+        headlines = []
+
+        for q in queries:
+            rss_url = f"https://news.google.com/rss/search?q={q}&hl=en&gl=US&ceid=US:en"
+            try:
+                resp = self.client.get(rss_url)
+                resp.raise_for_status()
+                root = ET.fromstring(resp.text)
+                for item in root.findall(".//item")[:5]:
+                    title_el = item.find("title")
+                    if title_el is not None and title_el.text:
+                        headlines.append(unescape(title_el.text))
+            except Exception as e:
+                logger.warning("Global context RSS 抓取失敗 (%s): %s", q, e)
+
+        logger.info("全球 context: 取得 %d 則標題", len(headlines))
+        return headlines
+
     # ── 整合爬蟲 ────────────────────────────────────────
 
     def crawl_all(self, stock_id: str) -> list[dict]:
@@ -356,5 +456,13 @@ class SentimentCrawler:
         cnyes_articles = self.crawl_cnyes(stock_id)
         all_articles.extend(cnyes_articles)
         logger.info("鉅亨網: 取得 %d 篇文章", len(cnyes_articles))
+
+        google_articles = self.crawl_google_news(stock_id)
+        all_articles.extend(google_articles)
+        logger.info("Google News: 取得 %d 篇文章", len(google_articles))
+
+        yahoo_articles = self.crawl_yahoo_tw(stock_id)
+        all_articles.extend(yahoo_articles)
+        logger.info("Yahoo TW: 取得 %d 篇文章", len(yahoo_articles))
 
         return all_articles

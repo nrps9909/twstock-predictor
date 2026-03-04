@@ -7,6 +7,9 @@ Tables:
 - BacktestResult: 回測結果 (Tier 2)
 - AgentMemory: Agent 記憶體 (Tier 3)
 - TradeJournal: 交易日誌 (Tier 3)
+- MarketScanResult: 全市場掃描結果
+- PipelineResult: 每日自動深度分析結果
+- FactorICRecord: 因子 IC 追蹤紀錄
 """
 
 from datetime import date, datetime
@@ -16,6 +19,7 @@ from sqlalchemy import (
     Date,
     DateTime,
     Float,
+    Index,
     Integer,
     String,
     Text,
@@ -248,3 +252,134 @@ class TradeJournal(Base):
     market_snapshot = Column(JSON)  # 交易當下的市場狀態
 
     created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class Alert(Base):
+    """警報紀錄 — 掃描後偵測到的重大訊號變動"""
+
+    __tablename__ = "alerts"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    alert_date = Column(Date, nullable=False, index=True)
+    stock_id = Column(String(10), nullable=False, index=True)
+    stock_name = Column(String(100))
+    alert_type = Column(String(30), nullable=False)
+    # "signal_change" | "strong_signal" | "institutional_surge" | "sync_buy" | "score_jump"
+    severity = Column(String(10), nullable=False)  # "high" | "medium" | "low"
+    title = Column(String(200), nullable=False)
+    detail = Column(Text)
+    current_signal = Column(String(20))
+    previous_signal = Column(String(20))
+    current_score = Column(Float)
+    previous_score = Column(Float)
+    is_read = Column(Integer, default=0)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class FactorICRecord(Base):
+    """因子 IC 追蹤紀錄 — 存每日因子分數 + 遠期報酬，計算因子有效性"""
+
+    __tablename__ = "factor_ic_records"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    record_date = Column(Date, nullable=False, index=True)
+    stock_id = Column(String(10), nullable=False, index=True)
+    factor_name = Column(String(30), nullable=False)
+    factor_score = Column(Float, nullable=False)
+    forward_return_5d = Column(Float)   # 5 交易日後回填
+    forward_return_20d = Column(Float)  # 20 交易日後回填
+
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("record_date", "stock_id", "factor_name",
+                         name="uix_factor_ic_record"),
+    )
+
+
+class MarketScanResult(Base):
+    """全市場掃描結果"""
+
+    __tablename__ = "market_scans"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    scan_date = Column(Date, nullable=False, index=True)
+    stock_id = Column(String(10), nullable=False, index=True)
+    stock_name = Column(String(100))
+    current_price = Column(Float)
+    price_change_pct = Column(Float)
+
+    # Signals
+    signal = Column(String(20))  # buy, sell, hold, strong_buy, strong_sell
+    confidence = Column(Float)
+    total_score = Column(Float)
+
+    # Sub-scores (original 5)
+    technical_score = Column(Float)
+    fundamental_score = Column(Float)
+    sentiment_score = Column(Float)
+    ml_score = Column(Float)
+    momentum_score = Column(Float)
+
+    # Sub-scores (new 4)
+    institutional_flow_score = Column(Float)
+    margin_retail_score = Column(Float)
+    volatility_score = Column(Float)
+    liquidity_score = Column(Float)
+    value_quality_score = Column(Float)
+
+    # Institutional flows (5-day net, in lots)
+    foreign_net_5d = Column(Float)
+    trust_net_5d = Column(Float)
+    dealer_net_5d = Column(Float)
+
+    # Ranking + reasoning
+    ranking = Column(Integer)
+    reasoning = Column(Text)
+
+    # Score transparency
+    score_coverage = Column(JSON, nullable=True)  # {"technical": true, "ml": false, ...}
+    effective_coverage = Column(Float, nullable=True)  # 0.0~1.0
+
+    # Confidence breakdown
+    confidence_agreement = Column(Float)
+    confidence_strength = Column(Float)
+    confidence_coverage = Column(Float)
+    confidence_freshness = Column(Float)
+    risk_discount = Column(Float)
+
+    # Regime
+    market_regime = Column(String(20))
+    factor_details = Column(JSON)
+
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("scan_date", "stock_id", name="uix_scan_date_stock"),
+    )
+
+
+class PipelineResult(Base):
+    """每日自動深度分析結果"""
+
+    __tablename__ = "pipeline_results"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    stock_id = Column(String(10), nullable=False, index=True)
+    analysis_date = Column(Date, nullable=False, index=True)
+    signal = Column(String(20))           # buy/sell/hold
+    confidence = Column(Float)
+    predicted_price = Column(Float)
+    reasoning = Column(Text)              # Agent 決策理由
+    agent_scores = Column(JSON)           # 各 agent 分數
+    sentiment_summary = Column(Text)      # 情緒摘要
+    news_summary = Column(Text)           # 新聞摘要
+    technical_data = Column(JSON)         # K 線 + 技術指標
+    institutional_data = Column(JSON)     # 法人買賣超
+    risk_approved = Column(Integer)       # 風控通過
+    pipeline_version = Column(String(20)) # 追蹤版本
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("stock_id", "analysis_date", name="uix_pipeline_stock_date"),
+    )

@@ -9,7 +9,7 @@ import logging
 from src.agents.base import (
     AgentMessage, AgentRole, BaseAgent, MarketContext, Signal, TradeDecision,
 )
-from src.utils.config import settings
+from src.utils.llm_client import call_claude, parse_json_response
 
 logger = logging.getLogger(__name__)
 
@@ -54,7 +54,6 @@ class TraderAgent(BaseAgent):
 
     def __init__(self):
         super().__init__(AgentRole.TRADER)
-        self.api_key = settings.ANTHROPIC_API_KEY
 
     async def analyze(self, context: MarketContext) -> AgentMessage:
         """基於 context 做出交易決策（不含研究報告的簡化版）"""
@@ -141,37 +140,10 @@ class TraderAgent(BaseAgent):
         )
 
     async def _call_llm(self, prompt: str) -> dict:
-        """呼叫 Claude Sonnet"""
-        import json
-        import httpx
-
-        if not self.api_key:
-            return {"action": "hold", "confidence": 0.3, "reasoning": "LLM 不可用"}
-
+        """呼叫 Claude Sonnet（透過 claude -p CLI）"""
         try:
-            async with httpx.AsyncClient() as client:
-                resp = await client.post(
-                    "https://api.anthropic.com/v1/messages",
-                    headers={
-                        "x-api-key": self.api_key,
-                        "anthropic-version": "2023-06-01",
-                        "content-type": "application/json",
-                    },
-                    json={
-                        "model": "claude-sonnet-4-6",
-                        "max_tokens": 1024,
-                        "messages": [{"role": "user", "content": prompt}],
-                    },
-                    timeout=30,
-                )
-                resp.raise_for_status()
-                data = resp.json()
-                text = data["content"][0]["text"].strip()
-                if text.startswith("```"):
-                    text = text.split("```")[1]
-                    if text.startswith("json"):
-                        text = text[4:]
-                return json.loads(text)
+            text = await call_claude(prompt, model="claude-sonnet-4-6", timeout=60)
+            return parse_json_response(text)
         except Exception as e:
-            self.logger.error("LLM 呼叫失敗: %s", e)
-            return {"action": "hold", "confidence": 0.3, "reasoning": f"LLM 錯誤: {e}"}
+            self.logger.exception("LLM 呼叫失敗 (%s)", type(e).__name__)
+            return {"action": "hold", "confidence": 0.3, "reasoning": f"LLM 錯誤 ({type(e).__name__}): {e}"}

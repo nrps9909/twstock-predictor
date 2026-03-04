@@ -1,0 +1,384 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@import url('https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,400;0,600;0,700;1,400&family=Noto+Sans+TC:wght@300;400;500;700&family=Space+Mono:wght@400;700&display=swap');
+
+:root {
+  --bg-primary: #07090F;
+  --bg-secondary: #0D1117;
+  --bg-card: #141922;
+  --bg-card-hover: #1A2030;
+  --accent-gold: #C9A84C;
+  --accent-gold-light: #E2C87A;
+  --accent-gold-dim: rgba(201, 168, 76, 0.15);
+  --accent-gold-glow: rgba(201, 168, 76, 0.4);
+  --signal-buy: #E8524A;
+  --signal-sell: #2BA58B;
+  --signal-hold: #D4A84C;
+  --text-primary: #D8DBE2;
+  --text-secondary: #6B7280;
+  --text-muted: #3B4252;
+  --border: rgba(255, 255, 255, 0.05);
+  --border-hover: rgba(201, 168, 76, 0.2);
+}
+
+*, *::before, *::after {
+  box-sizing: border-box;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font-family: 'Noto Sans TC', -apple-system, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  overflow-x: hidden;
+}
+
+/* ─── Scrollbar ───────────────────────────────── */
+::-webkit-scrollbar { width: 5px; height: 5px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: rgba(201, 168, 76, 0.15);
+  border-radius: 10px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(201, 168, 76, 0.3);
+}
+
+/* ─── Selection ───────────────────────────────── */
+::selection {
+  background: rgba(201, 168, 76, 0.25);
+  color: var(--text-primary);
+}
+
+@layer components {
+
+  /* ─── Display Font ────────────────────────────── */
+  .font-display {
+    font-family: 'Cormorant Garamond', Georgia, serif;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+  }
+
+  /* ─── Mono / Numeric Font ─────────────────────── */
+  .font-num {
+    font-family: 'Space Mono', 'Courier New', monospace;
+    font-variant-numeric: tabular-nums;
+    letter-spacing: -0.02em;
+  }
+
+  /* ─── Grain Overlay ───────────────────────────── */
+  .grain-overlay {
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    z-index: 9999;
+    opacity: 0.025;
+    background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)'/%3E%3C/svg%3E");
+    background-repeat: repeat;
+    mix-blend-mode: overlay;
+  }
+
+  /* ─── Ambient Gradient ────────────────────────── */
+  .ambient-glow {
+    position: fixed;
+    top: -30%;
+    left: 50%;
+    width: 120%;
+    height: 60%;
+    transform: translateX(-50%);
+    background: radial-gradient(
+      ellipse at center,
+      rgba(201, 168, 76, 0.03) 0%,
+      transparent 70%
+    );
+    pointer-events: none;
+    z-index: 0;
+  }
+
+  /* ─── Glass Card ──────────────────────────────── */
+  .glass-card {
+    @apply relative overflow-hidden rounded-2xl;
+    background: linear-gradient(
+      135deg,
+      rgba(20, 25, 34, 0.9) 0%,
+      rgba(13, 17, 23, 0.95) 100%
+    );
+    border: 1px solid var(--border);
+    box-shadow:
+      0 1px 2px rgba(0, 0, 0, 0.3),
+      0 8px 32px rgba(0, 0, 0, 0.15),
+      inset 0 1px 0 rgba(255, 255, 255, 0.02);
+    transition: border-color 0.5s cubic-bezier(0.4, 0, 0.2, 1),
+                box-shadow 0.5s cubic-bezier(0.4, 0, 0.2, 1),
+                transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  }
+  .glass-card::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 1px;
+    background: linear-gradient(
+      90deg,
+      transparent 0%,
+      rgba(201, 168, 76, 0.1) 50%,
+      transparent 100%
+    );
+    opacity: 0;
+    transition: opacity 0.5s ease;
+  }
+  .glass-card:hover {
+    border-color: var(--border-hover);
+    box-shadow:
+      0 1px 2px rgba(0, 0, 0, 0.3),
+      0 12px 48px rgba(0, 0, 0, 0.2),
+      0 0 0 1px rgba(201, 168, 76, 0.05),
+      inset 0 1px 0 rgba(255, 255, 255, 0.03);
+    transform: translateY(-1px);
+  }
+  .glass-card:hover::before {
+    opacity: 1;
+  }
+
+  .glass-card-static {
+    @apply relative overflow-hidden rounded-2xl;
+    background: linear-gradient(
+      135deg,
+      rgba(20, 25, 34, 0.9) 0%,
+      rgba(13, 17, 23, 0.95) 100%
+    );
+    border: 1px solid var(--border);
+    box-shadow:
+      0 1px 2px rgba(0, 0, 0, 0.3),
+      0 8px 32px rgba(0, 0, 0, 0.15),
+      inset 0 1px 0 rgba(255, 255, 255, 0.02);
+  }
+
+  /* ─── Geometric Accent Line ───────────────────── */
+  .geo-line {
+    @apply relative;
+  }
+  .geo-line::after {
+    content: '';
+    position: absolute;
+    bottom: 0;
+    left: 0;
+    width: 32px;
+    height: 2px;
+    background: linear-gradient(90deg, var(--accent-gold), transparent);
+    border-radius: 1px;
+  }
+
+  /* ─── Signal Colors ───────────────────────────── */
+  .signal-buy { color: var(--signal-buy); }
+  .signal-sell { color: var(--signal-sell); }
+  .signal-hold { color: var(--signal-hold); }
+
+  /* ─── Gold Button (Hero CTA) ──────────────────── */
+  .btn-gold {
+    @apply relative px-10 py-5 rounded-2xl font-bold text-lg cursor-pointer select-none;
+    font-family: 'Noto Sans TC', sans-serif;
+    color: #0A0C10;
+    background: linear-gradient(
+      135deg,
+      #B8962F 0%,
+      #D4B44A 30%,
+      #E8D082 50%,
+      #D4B44A 70%,
+      #B8962F 100%
+    );
+    background-size: 300% 300%;
+    background-position: 0% 50%;
+    box-shadow:
+      0 0 0 1px rgba(201, 168, 76, 0.3),
+      0 4px 16px rgba(201, 168, 76, 0.2),
+      0 8px 40px rgba(0, 0, 0, 0.3),
+      inset 0 1px 0 rgba(255, 255, 255, 0.3),
+      inset 0 -1px 0 rgba(0, 0, 0, 0.1);
+    transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+    animation: goldShimmer 4s ease-in-out infinite;
+  }
+  .btn-gold:hover {
+    background-position: 100% 50%;
+    box-shadow:
+      0 0 0 1px rgba(201, 168, 76, 0.5),
+      0 6px 24px rgba(201, 168, 76, 0.3),
+      0 12px 48px rgba(0, 0, 0, 0.4),
+      inset 0 1px 0 rgba(255, 255, 255, 0.4),
+      inset 0 -1px 0 rgba(0, 0, 0, 0.1);
+    transform: translateY(-2px);
+  }
+  .btn-gold:active {
+    transform: translateY(0);
+    transition-duration: 0.1s;
+  }
+  .btn-gold:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+    transform: none;
+    animation: none;
+  }
+  @keyframes goldShimmer {
+    0%, 100% { background-position: 0% 50%; }
+    50% { background-position: 50% 50%; }
+  }
+
+  /* ─── Orbital Ring (for button) ───────────────── */
+  .orbital-ring {
+    position: absolute;
+    inset: -8px;
+    border-radius: 24px;
+    border: 1px solid transparent;
+    pointer-events: none;
+    background: conic-gradient(
+      from 0deg,
+      transparent 0%,
+      rgba(201, 168, 76, 0.3) 25%,
+      transparent 50%,
+      rgba(201, 168, 76, 0.15) 75%,
+      transparent 100%
+    ) border-box;
+    -webkit-mask: linear-gradient(#fff 0 0) padding-box, linear-gradient(#fff 0 0);
+    mask: linear-gradient(#fff 0 0) padding-box, linear-gradient(#fff 0 0);
+    -webkit-mask-composite: xor;
+    mask-composite: exclude;
+    animation: orbitSpin 8s linear infinite;
+  }
+  @keyframes orbitSpin {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
+  }
+
+  /* ─── Pulse Ring ──────────────────────────────── */
+  .pulse-ring {
+    animation: pulseRing 3s ease-out infinite;
+  }
+  @keyframes pulseRing {
+    0% {
+      box-shadow: 0 0 0 0 rgba(201, 168, 76, 0.25);
+    }
+    70% {
+      box-shadow: 0 0 0 20px rgba(201, 168, 76, 0);
+    }
+    100% {
+      box-shadow: 0 0 0 0 rgba(201, 168, 76, 0);
+    }
+  }
+
+  /* ─── Step Indicator Glow ─────────────────────── */
+  .step-done {
+    box-shadow: 0 0 8px rgba(34, 197, 94, 0.3);
+  }
+  .step-running {
+    box-shadow: 0 0 12px rgba(201, 168, 76, 0.4);
+    animation: stepPulse 1.5s ease-in-out infinite;
+  }
+  @keyframes stepPulse {
+    0%, 100% { box-shadow: 0 0 8px rgba(201, 168, 76, 0.2); }
+    50% { box-shadow: 0 0 20px rgba(201, 168, 76, 0.5); }
+  }
+
+  /* ─── Connector Sweep ─────────────────────────── */
+  .connector-sweep {
+    position: relative;
+    overflow: hidden;
+  }
+  .connector-sweep::after {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: -100%;
+    width: 100%;
+    height: 100%;
+    background: linear-gradient(90deg, transparent, rgba(201, 168, 76, 0.4), transparent);
+    animation: connectorSweep 2s ease-in-out infinite;
+  }
+  @keyframes connectorSweep {
+    0% { left: -100%; }
+    100% { left: 200%; }
+  }
+
+  /* ─── Stagger Animation ───────────────────────── */
+  .stagger-in {
+    animation: staggerFadeIn 0.6s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+    opacity: 0;
+    transform: translateY(16px);
+  }
+  @keyframes staggerFadeIn {
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+
+  /* ─── Card Reveal ─────────────────────────────── */
+  .card-reveal {
+    animation: cardReveal 0.7s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+    opacity: 0;
+    transform: translateY(24px) scale(0.97);
+  }
+  @keyframes cardReveal {
+    to {
+      opacity: 1;
+      transform: translateY(0) scale(1);
+    }
+  }
+
+  /* ─── Number Counter ──────────────────────────── */
+  .number-glow {
+    text-shadow: 0 0 20px currentColor;
+  }
+
+  /* ─── Skeleton ────────────────────────────────── */
+  .skeleton {
+    @apply rounded-lg;
+    background: linear-gradient(
+      90deg,
+      rgba(255, 255, 255, 0.02) 0%,
+      rgba(255, 255, 255, 0.05) 50%,
+      rgba(255, 255, 255, 0.02) 100%
+    );
+    background-size: 200% 100%;
+    animation: shimmer 1.8s ease-in-out infinite;
+  }
+  @keyframes shimmer {
+    0% { background-position: -200% 0; }
+    100% { background-position: 200% 0; }
+  }
+
+  /* ─── Section Label ───────────────────────────── */
+  .section-label {
+    @apply text-[10px] uppercase tracking-[0.2em] font-medium;
+    color: var(--text-secondary);
+    font-family: 'Space Mono', monospace;
+  }
+
+  /* ─── Divider ─────────────────────────────────── */
+  .divider-gold {
+    height: 1px;
+    background: linear-gradient(
+      90deg,
+      transparent 0%,
+      rgba(201, 168, 76, 0.15) 20%,
+      rgba(201, 168, 76, 0.15) 80%,
+      transparent 100%
+    );
+  }
+
+  /* ─── Breath Glow (signal badges) ─────────────── */
+  .breath-glow {
+    animation: breathGlow 3s ease-in-out infinite;
+  }
+  @keyframes breathGlow {
+    0%, 100% { filter: brightness(1); }
+    50% { filter: brightness(1.2); }
+  }
+}

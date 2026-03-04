@@ -9,12 +9,13 @@ Final: 綜合辯論歷史產出共識
 預設 2 rounds → 5 LLM calls (vs 舊版 1 call)。
 """
 
+import asyncio
 import logging
 
 from src.agents.base import (
     AgentMessage, AgentRole, BaseAgent, MarketContext, Signal,
 )
-from src.utils.config import settings
+from src.utils.llm_client import call_claude, parse_json_response
 
 logger = logging.getLogger(__name__)
 
@@ -78,13 +79,13 @@ class ResearcherAgent(BaseAgent):
 
     def __init__(self, debate_rounds: int = 2):
         super().__init__(AgentRole.RESEARCHER)
-        self.api_key = settings.ANTHROPIC_API_KEY
         self.debate_rounds = min(debate_rounds, MAX_DEBATE_ROUNDS)
 
     async def analyze(
         self,
         context: MarketContext,
         analyst_messages: list[AgentMessage] | None = None,
+        progress_queue: asyncio.Queue | None = None,
     ) -> AgentMessage:
         """多輪辯論分析"""
         if analyst_messages is None:
@@ -93,26 +94,28 @@ class ResearcherAgent(BaseAgent):
         reports_text = self._format_analyst_reports(analyst_messages)
         debate_history = []
 
-        # Round 1: 各自陳述
-        bull_case = await self._generate_case(
-            "bull", context, reports_text,
-        )
-        bear_case = await self._generate_case(
-            "bear", context, reports_text,
+        # Round 1: 各自陳述（並行）
+        bull_case, bear_case = await asyncio.gather(
+            self._generate_case("bull", context, reports_text),
+            self._generate_case("bear", context, reports_text),
         )
         debate_history.append({"round": 1, "bull": bull_case, "bear": bear_case})
+
+        self._emit(progress_queue, "debate_round", {
+            "round": 1,
+            "bull_args": bull_case.get("arguments", [])[:2],
+            "bear_args": bear_case.get("arguments", [])[:2],
+        })
 
         # 檢查是否已經收斂
         if self._check_convergence(bull_case, bear_case):
             self.logger.info("Round 1 已收斂，跳過後續辯論")
         else:
-            # Rounds 2-N: 互相反駁
+            # Rounds 2-N: 互相反駁（並行）
             for round_num in range(2, self.debate_rounds + 1):
-                bull_rebuttal = await self._generate_rebuttal(
-                    "看多", bull_case, bear_case, "0.5 到 1.0",
-                )
-                bear_rebuttal = await self._generate_rebuttal(
-                    "看空", bear_case, bull_case, "-1.0 到 -0.5",
+                bull_rebuttal, bear_rebuttal = await asyncio.gather(
+                    self._generate_rebuttal("看多", bull_case, bear_case, "0.5 到 1.0"),
+                    self._generate_rebuttal("看空", bear_case, bull_case, "-1.0 到 -0.5"),
                 )
                 debate_history.append({
                     "round": round_num,
@@ -122,11 +125,18 @@ class ResearcherAgent(BaseAgent):
                 bull_case = bull_rebuttal
                 bear_case = bear_rebuttal
 
+                self._emit(progress_queue, "debate_round", {
+                    "round": round_num,
+                    "bull_args": bull_rebuttal.get("updated_arguments", bull_rebuttal.get("arguments", []))[:2],
+                    "bear_args": bear_rebuttal.get("updated_arguments", bear_rebuttal.get("arguments", []))[:2],
+                })
+
                 if self._check_convergence(bull_case, bear_case):
                     self.logger.info("Round %d 收斂", round_num)
                     break
 
         # Final: 綜合辯論歷史
+        self._emit(progress_queue, "debate_synthesis", {})
         result = await self._synthesize(context, debate_history)
 
         signal_map = {
@@ -190,18 +200,40 @@ class ResearcherAgent(BaseAgent):
             date=context.date,
             debate_history=history_text,
         )
-        return await self._call_llm(prompt)
+        return await self._call_llm(prompt, model="claude-sonnet-4-6")
+
+    # 字串 signal → 數值映射（供 convergence 判斷）
+    _SIGNAL_NUMERIC = {
+        "strong_buy": 1.0,
+        "buy": 0.5,
+        "hold": 0.0,
+        "sell": -0.5,
+        "strong_sell": -1.0,
+    }
 
     def _check_convergence(self, bull_case: dict, bear_case: dict) -> bool:
         """檢查是否收斂（雙方信號差 < threshold）
 
         bull signal 為正 (0.5~1.0), bear signal 為負 (-1.0~-0.5)。
         比較原始值差距，不取 abs()。
+        signal 可能是數值或字串（如 "hold"），兩者都處理。
         """
-        bull_signal = float(bull_case.get("signal", 0.7))
-        bear_signal = float(bear_case.get("signal", -0.7))
+        bull_signal = self._parse_signal(bull_case.get("signal", 0.7))
+        bear_signal = self._parse_signal(bear_case.get("signal", -0.7))
         diff = abs(bull_signal - bear_signal)
         return diff < CONVERGENCE_THRESHOLD
+
+    def _parse_signal(self, value) -> float:
+        """將 signal 值轉為數值（接受數值或字串）"""
+        if isinstance(value, (int, float)):
+            return float(value)
+        if isinstance(value, str):
+            # 先嘗試直接轉數值（如 "0.7"）
+            try:
+                return float(value)
+            except ValueError:
+                return self._SIGNAL_NUMERIC.get(value, 0.0)
+        return 0.0
 
     def _format_analyst_reports(self, messages: list[AgentMessage]) -> str:
         text = ""
@@ -214,38 +246,20 @@ class ResearcherAgent(BaseAgent):
             )
         return text
 
-    async def _call_llm(self, prompt: str) -> dict:
-        """呼叫 Claude Sonnet"""
-        import json
-        import httpx
+    @staticmethod
+    def _emit(queue: asyncio.Queue | None, substep: str, data: dict | None = None) -> None:
+        """非阻塞發送進度事件"""
+        if queue is not None:
+            try:
+                queue.put_nowait({"substep": substep, **(data or {})})
+            except asyncio.QueueFull:
+                pass
 
-        if not self.api_key:
-            return {"signal": "hold", "confidence": 0.3, "reasoning": "LLM 不可用"}
-
+    async def _call_llm(self, prompt: str, model: str = "claude-haiku-4-5-20251001") -> dict:
+        """呼叫 Claude（透過 claude -p CLI）"""
         try:
-            async with httpx.AsyncClient() as client:
-                resp = await client.post(
-                    "https://api.anthropic.com/v1/messages",
-                    headers={
-                        "x-api-key": self.api_key,
-                        "anthropic-version": "2023-06-01",
-                        "content-type": "application/json",
-                    },
-                    json={
-                        "model": "claude-sonnet-4-6",
-                        "max_tokens": 1024,
-                        "messages": [{"role": "user", "content": prompt}],
-                    },
-                    timeout=30,
-                )
-                resp.raise_for_status()
-                data = resp.json()
-                text = data["content"][0]["text"].strip()
-                if text.startswith("```"):
-                    text = text.split("```")[1]
-                    if text.startswith("json"):
-                        text = text[4:]
-                return json.loads(text)
+            text = await call_claude(prompt, model=model, timeout=120)
+            return parse_json_response(text)
         except Exception as e:
-            self.logger.error("LLM 呼叫失敗: %s", e)
-            return {"signal": "hold", "confidence": 0.3, "reasoning": f"LLM 錯誤: {e}"}
+            self.logger.exception("LLM 呼叫失敗 (%s)", type(e).__name__)
+            return {"signal": "hold", "confidence": 0.3, "reasoning": f"LLM 錯誤 ({type(e).__name__}): {e}"}

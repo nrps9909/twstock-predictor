@@ -14,6 +14,7 @@ import numpy as np
 import pandas as pd
 
 from src.utils.config import settings
+from src.utils.llm_client import call_claude_sync, parse_json_response
 
 logger = logging.getLogger(__name__)
 
@@ -76,21 +77,7 @@ class SentimentAnalyzer:
 
         try:
             if self.provider == "anthropic":
-                resp = self.client.post(
-                    self.api_url,
-                    headers={
-                        "x-api-key": self.api_key,
-                        "anthropic-version": "2023-06-01",
-                        "content-type": "application/json",
-                    },
-                    json={
-                        "model": "claude-sonnet-4-6-20250514",
-                        "max_tokens": 200,
-                        "messages": [{"role": "user", "content": prompt}],
-                    },
-                )
-                resp.raise_for_status()
-                content = resp.json()["content"][0]["text"]
+                content = call_claude_sync(prompt, model="claude-sonnet-4-6", timeout=30)
             else:
                 resp = self.client.post(
                     self.api_url,
@@ -107,7 +94,10 @@ class SentimentAnalyzer:
                 resp.raise_for_status()
                 content = resp.json()["choices"][0]["message"]["content"]
 
-            result = json.loads(content)
+            if self.provider == "anthropic":
+                result = parse_json_response(content)
+            else:
+                result = json.loads(content)
             return SentimentScore(
                 label=result.get("label", "neutral"),
                 score=float(result.get("score", 0)),

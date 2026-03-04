@@ -1,13 +1,20 @@
-"""Orchestrator — Agent 流程控制（DAG）
+"""Orchestrator — 統一分析管線入口
 
-架構原則：LLM 是研究助手，不是交易員。ML 做預測，規則做風控。
+架構原則：
+- 20 因子演算法評分是主引擎
+- ML 模型是其中一個因子 (7%)
+- LLM 只負責情緒萃取 + 敘事生成 (2 次呼叫)
+- 硬性風控不可被覆蓋
 
-執行順序：
-1. 4 個分析 Agent 並行 → [技術, 情緒, 基本面, 量化]（LLM 提供觀點）
-2. 研究員 Agent 彙整（多空辯論）→ 僅供參考
-3. 規則引擎決策（ML 信號為主，Agent 為輔）
-4. 硬性風控（LLM 無法覆蓋）
-5. 記憶更新
+統一管線 6 階段:
+1. 數據收集 (並行)
+2. 特徵萃取 (20 因子 + HMM + ML + LLM 情緒)
+3. 多因子評分
+4. LLM 敘事生成
+5. 風險控制 + 部位建議
+6. 儲存 + 警報
+
+保留 RuleEngine 和 AgentOrchestrator 向後相容接口。
 """
 
 import asyncio
@@ -19,12 +26,6 @@ import numpy as np
 from src.agents.base import (
     AgentMessage, AgentRole, MarketContext, Signal, TradeDecision,
 )
-from src.agents.technical_agent import TechnicalAgent
-from src.agents.sentiment_agent import SentimentAgent
-from src.agents.fundamental_agent import FundamentalAgent
-from src.agents.quant_agent import QuantAgent
-from src.agents.researcher_agent import ResearcherAgent
-from src.agents.trader_agent import TraderAgent
 from src.agents.risk_agent import RiskAgent, RiskLimits
 from src.agents.memory import AgentMemorySystem
 from src.risk.manager import RiskManager
@@ -36,13 +37,10 @@ class RuleEngine:
     """規則引擎 — ML 信號為主，Agent 觀點為輔
 
     核心原則：
-    - ML 模型信號佔 70% 權重，Agent 觀點佔 30%
-    - Agent 只能提供「建議」，不能直接「決策」
+    - ML 有效預測時: ML 60% + Agent 40%
+    - ML 不可用時: Agent 100%
     - 硬性風控規則無法被任何來源覆蓋
     """
-
-    ML_WEIGHT = 0.7
-    AGENT_WEIGHT = 0.3
 
     # 信號映射
     SIGNAL_SCORE = {
@@ -73,24 +71,30 @@ class RuleEngine:
         Returns:
             (final_action, final_confidence, reasoning)
         """
+        # 動態權重: ML 有效預測時 60/40, 否則 Agent 全權
+        if ml_signal != "hold" and ml_confidence > 0.1:
+            ml_w, agent_w = 0.6, 0.4
+        else:
+            ml_w, agent_w = 0.0, 1.0
+
         ml_score = self.SIGNAL_SCORE.get(ml_signal, 0.0) * ml_confidence
         agent_score = self.SIGNAL_SCORE.get(agent_signal, 0.0) * agent_confidence
 
-        combined = self.ML_WEIGHT * ml_score + self.AGENT_WEIGHT * agent_score
+        combined = ml_w * ml_score + agent_w * agent_score
 
         # 市場狀態調整
-        state_scale = 1.0
-        if market_state == "bear":
-            state_scale = 0.5  # 熊市中降低激進程度
-        elif market_state == "sideways":
-            state_scale = 0.7
+        state_scale = {"bear": 0.5, "sideways": 0.7, "bull": 1.0}
+        scale = state_scale.get(market_state, 0.7) if market_state else 1.0
 
-        adjusted = combined * state_scale
+        adjusted = combined * scale
 
-        # 決策閾值
-        if adjusted > 0.25:
+        # 決策閾值 (降低: ±0.25 → ±0.15)
+        BUY_THRESHOLD = 0.15
+        SELL_THRESHOLD = -0.15
+
+        if adjusted > BUY_THRESHOLD:
             action = "buy"
-        elif adjusted < -0.25:
+        elif adjusted < SELL_THRESHOLD:
             action = "sell"
         else:
             action = "hold"
@@ -99,22 +103,22 @@ class RuleEngine:
 
         # 建構推理說明
         reasoning = (
-            f"規則引擎: ML({ml_signal} {ml_confidence:.0%}) × {self.ML_WEIGHT} "
-            f"+ Agent({agent_signal} {agent_confidence:.0%}) × {self.AGENT_WEIGHT} "
+            f"規則引擎: ML({ml_signal} {ml_confidence:.0%}) × {ml_w} "
+            f"+ Agent({agent_signal} {agent_confidence:.0%}) × {agent_w} "
             f"= {combined:.3f}"
         )
         if market_state:
-            reasoning += f" | 市場狀態={market_state} (scale={state_scale})"
+            reasoning += f" | 市場狀態={market_state} (scale={scale})"
         reasoning += f" → {action} ({confidence:.0%})"
 
         return action, confidence, reasoning
 
 
 class AgentOrchestrator:
-    """Agent 流程控制器
+    """統一分析管線入口
 
-    架構改進：LLM Agent 降級為「顧問」角色，
-    最終決策由規則引擎（ML 信號 + 硬性風控）決定。
+    使用統一管線 (StockAnalysisService) 替代原有 4 Agent + 辯論機制。
+    保留向後相容接口 (run_analysis → TradeDecision)。
     """
 
     def __init__(
@@ -123,20 +127,10 @@ class AgentOrchestrator:
         session_factory=None,
         risk_manager: RiskManager | None = None,
     ):
-        # 分析 Agents（提供觀點，非決策）
-        self.technical = TechnicalAgent()
-        self.sentiment = SentimentAgent()
-        self.fundamental = FundamentalAgent()
-        self.quant = QuantAgent()
-
-        # 研究員 Agent（綜合辯論，僅供參考）
-        self.researcher = ResearcherAgent()
-        # 交易員 Agent（降級為輔助角色）
-        self.trader = TraderAgent()
         # 風控 Agent（規則檢查）
         self.risk = RiskAgent(limits=risk_limits)
 
-        # 規則引擎（新核心）
+        # 規則引擎（保留向後相容）
         self.rule_engine = RuleEngine()
 
         # Meta-Labeler（可選，由外部注入）
@@ -151,8 +145,17 @@ class AgentOrchestrator:
         # 狀態
         self.last_decision: TradeDecision | None = None
         self._previous_market_state: str | None = None
-        self._positions: dict[str, dict] = {}  # stock_id → position info
-        self._pending_reduce_orders: list[dict] = []  # Phase 0.5 減倉指令
+        self._positions: dict[str, dict] = {}
+        self._pending_reduce_orders: list[dict] = []
+
+    @staticmethod
+    def _emit(queue: asyncio.Queue | None, substep: str, data: dict | None = None) -> None:
+        """非阻塞發送進度事件到 queue"""
+        if queue is not None:
+            try:
+                queue.put_nowait({"substep": substep, **(data or {})})
+            except asyncio.QueueFull:
+                pass
 
     async def run_analysis(
         self,
@@ -161,20 +164,13 @@ class AgentOrchestrator:
         ml_signal: str = "hold",
         ml_confidence: float = 0.5,
         market_state: str | None = None,
+        progress_queue: asyncio.Queue | None = None,
     ) -> TradeDecision:
-        """執行完整分析流程
+        """執行統一 6 階段分析管線
 
-        Args:
-            context: 市場環境
-            available_capital: 可用資金
-            ml_signal: ML 模型信號（從 EnsemblePredictor 取得）
-            ml_confidence: ML 模型信心度
-            market_state: HMM 市場狀態
-
-        Returns:
-            TradeDecision — 含所有 Agent 分析結果
+        委派給 StockAnalysisService，結果轉換為 TradeDecision 向後相容。
         """
-        logger.info("=== 開始分析 %s ===", context.stock_id)
+        logger.info("=== 開始統一管線分析 %s ===", context.stock_id)
 
         # 0. 硬性風控前置檢查
         if self.risk_manager.is_circuit_breaker_active():
@@ -202,134 +198,80 @@ class AgentOrchestrator:
                 if reduce_orders:
                     self._pending_reduce_orders = reduce_orders
                     logger.warning(
-                        "Phase 0.5: 行情轉場 %s→%s (severity=%.1f), 減倉 %d 檔: %s",
+                        "行情轉場 %s→%s (severity=%.1f), 減倉 %d 檔",
                         self._previous_market_state, market_state,
-                        transition.severity, len(reduce_orders), reduce_orders,
+                        transition.severity, len(reduce_orders),
                     )
         self._previous_market_state = market_state
 
-        # 1. 並行執行 4 個分析 Agent（LLM 提供觀點）
-        logger.info("Phase 1: 分析師觀點收集...")
-        analyst_tasks = [
-            self.technical.analyze(context),
-            self.sentiment.analyze(context),
-            self.fundamental.analyze(context),
-            self.quant.analyze(context),
-        ]
-        analyst_results = await asyncio.gather(*analyst_tasks, return_exceptions=True)
+        # 統一管線: 委派給 StockAnalysisService
+        self._emit(progress_queue, "pipeline_start")
+        try:
+            from api.services.stock_analysis_service import StockAnalysisService
+            service = StockAnalysisService()
 
-        # 過濾成功的結果
-        analyst_messages: list[AgentMessage] = []
-        for result in analyst_results:
-            if isinstance(result, AgentMessage):
-                analyst_messages.append(result)
-                logger.info(
-                    "  [%s] 觀點=%s, 信心=%.0f%%",
-                    result.sender.value,
-                    result.signal.value if result.signal else "N/A",
-                    result.confidence * 100,
+            # Collect the final result from SSE stream
+            final_result = None
+            async for event_str in service.analyze_stock(context.stock_id):
+                import json
+                try:
+                    # Parse SSE data line
+                    for line in event_str.strip().split("\n"):
+                        if line.startswith("data: "):
+                            payload = json.loads(line[6:])
+                            if payload.get("status") == "done" and payload.get("phase") == "complete":
+                                final_result = payload.get("data", {})
+                            # Forward progress
+                            self._emit(progress_queue, payload.get("phase", ""), payload)
+                except (json.JSONDecodeError, KeyError):
+                    pass
+
+            if final_result:
+                # Convert AnalysisResult to TradeDecision
+                risk_dec = final_result.get("risk_decision", {})
+                action = risk_dec.get("action", "hold")
+                position_size = risk_dec.get("position_size", 0.0)
+                confidence = final_result.get("confidence", 0.5)
+
+                # Apply Phase 0.5 reduce orders
+                reasoning = final_result.get("reasoning", "")
+                if self._pending_reduce_orders:
+                    for order in self._pending_reduce_orders:
+                        if order.get("stock_id") == context.stock_id:
+                            action = "sell"
+                            position_size = order.get("reduce_pct", 0.5) * position_size
+                            reasoning += f" | 行情轉場強制減倉"
+                            break
+
+                decision = TradeDecision(
+                    stock_id=context.stock_id,
+                    action=action,
+                    confidence=confidence,
+                    position_size=position_size,
+                    reasoning=reasoning,
+                    approved_by_risk=risk_dec.get("approved", True),
+                    risk_notes="; ".join(risk_dec.get("risk_notes", [])),
+                    stop_loss=risk_dec.get("stop_loss"),
+                    take_profit=risk_dec.get("take_profit"),
                 )
-            elif isinstance(result, Exception):
-                logger.error("  分析師錯誤: %s", result)
-
-        # 2. 研究員彙整（多空辯論）— 僅供參考
-        logger.info("Phase 2: 研究員辯論（僅供參考）...")
-        researcher_msg = await self.researcher.analyze(context, analyst_messages)
-        logger.info(
-            "  研究建議: %s (信心 %.0f%%)",
-            researcher_msg.signal.value if researcher_msg.signal else "N/A",
-            researcher_msg.confidence * 100,
-        )
-
-        # 3. 規則引擎決策（ML 信號為主，Agent 為輔）
-        logger.info("Phase 3: 規則引擎決策 (ML=%.0f%%, Agent=%.0f%%)...",
-                     RuleEngine.ML_WEIGHT * 100, RuleEngine.AGENT_WEIGHT * 100)
-
-        agent_signal = researcher_msg.signal.value if researcher_msg.signal else "hold"
-        agent_confidence = researcher_msg.confidence
-
-        final_action, final_confidence, reasoning = self.rule_engine.decide(
-            ml_signal=ml_signal,
-            ml_confidence=ml_confidence,
-            agent_signal=agent_signal,
-            agent_confidence=agent_confidence,
-            market_state=market_state,
-        )
-        logger.info("  規則引擎: %s (%.0f%%) — %s", final_action, final_confidence * 100, reasoning)
-
-        # 倉位大小（若有 meta-labeler 則用其校準結果，否則線性縮放）
-        position_size = final_confidence * 0.20
-        if hasattr(self, 'meta_labeler') and self.meta_labeler is not None:
-            try:
-                meta_prob = self.meta_labeler.predict_proba(
-                    self.meta_labeler.prepare_meta_features(
-                        primary_pred=np.array([ml_confidence if final_action == "buy" else -ml_confidence]),
-                        signal_strength=np.array([final_confidence]),
-                    )
+            else:
+                decision = TradeDecision(
+                    stock_id=context.stock_id,
+                    action="hold",
+                    confidence=0.0,
+                    reasoning="統一管線未產生結果",
                 )
-                position_size = float(self.meta_labeler.bet_size(meta_prob)[0])
-                reasoning += f" | meta_size={position_size:.1%}"
-            except Exception:
-                pass  # fallback to linear scaling
 
-        # 若 Phase 0.5 產生了減倉指令且目標在其中，強制 sell
-        if self._pending_reduce_orders:
-            for order in self._pending_reduce_orders:
-                if order.get("stock_id") == context.stock_id:
-                    final_action = "sell"
-                    position_size = order.get("reduce_pct", 0.5) * position_size
-                    reasoning += f" | Phase 0.5 強制減倉 {order.get('reduce_pct', 0.5):.0%}"
-                    break
-
-        decision = TradeDecision(
-            stock_id=context.stock_id,
-            action=final_action,
-            confidence=final_confidence,
-            position_size=position_size,
-            reasoning=reasoning,
-            analyst_reports=analyst_messages,
-            researcher_report=researcher_msg,
-        )
-
-        # 4. 硬性風控（LLM 無法覆蓋）
-        logger.info("Phase 4: 硬性風控審核...")
-
-        # 4a. RiskManager 硬性檢查
-        passed, hard_reason = self.risk_manager.hard_risk_check(
-            action=final_action,
-            stock_id=context.stock_id,
-            portfolio_value=available_capital,
-            position_size_pct=decision.position_size,
-        )
-        if not passed:
-            decision.action = "hold"
-            decision.approved_by_risk = False
-            decision.risk_notes = f"硬性風控否決: {hard_reason}"
-            logger.warning("  硬性風控否決: %s", hard_reason)
-        else:
-            # 4b. RiskAgent 軟性檢查
-            approved, reason, decision = self.risk.evaluate_trade(
-                decision, context, available_capital
+        except Exception as e:
+            logger.error("統一管線失敗: %s", e)
+            decision = TradeDecision(
+                stock_id=context.stock_id,
+                action="hold",
+                confidence=0.0,
+                reasoning=f"統一管線錯誤: {e}",
             )
-            logger.info("  風控結果: %s — %s", "核准" if approved else "否決", reason)
 
-        # 5. 記憶更新
-        self._update_memory(context, decision, analyst_messages, researcher_msg)
-
-        self.last_decision = decision
-        logger.info("=== 分析完成: %s %s ===", decision.action, context.stock_id)
-
-        return decision
-
-    def _update_memory(
-        self,
-        context: MarketContext,
-        decision: TradeDecision,
-        analysts: list[AgentMessage],
-        researcher: AgentMessage,
-    ):
-        """更新記憶系統"""
-        # 短期記憶
+        # 記憶更新
         self.memory.short_term.add(
             context.date,
             {
@@ -341,28 +283,10 @@ class AgentOrchestrator:
             },
         )
 
-        # 如果有實際交易動作 → 記錄到情境記憶
-        if decision.action != "hold" and decision.approved_by_risk:
-            reasoning = {
-                "technical": analysts[0].content if len(analysts) > 0 else None,
-                "sentiment": analysts[1].content if len(analysts) > 1 else None,
-                "fundamental": analysts[2].content if len(analysts) > 2 else None,
-                "quant": analysts[3].content if len(analysts) > 3 else None,
-                "researcher": researcher.content,
-                "trader_reasoning": decision.reasoning,
-                "risk": decision.risk_notes,
-                "market_snapshot": {
-                    "price": context.current_price,
-                    "date": context.date,
-                },
-            }
-            self.memory.episodic.record_trade(
-                stock_id=context.stock_id,
-                trade_date=context.date,
-                action=decision.action,
-                price=context.current_price,
-                reasoning=reasoning,
-            )
+        self.last_decision = decision
+        logger.info("=== 分析完成: %s %s ===", decision.action, context.stock_id)
+        self._emit(progress_queue, "__done__")
+        return decision
 
     def get_analysis_summary(self) -> dict:
         """取得最近一次分析的摘要"""
@@ -370,24 +294,11 @@ class AgentOrchestrator:
             return {"status": "no_analysis"}
 
         d = self.last_decision
-        summary = {
+        return {
             "stock_id": d.stock_id,
             "action": d.action,
             "confidence": d.confidence,
             "approved": d.approved_by_risk,
             "risk_notes": d.risk_notes,
             "reasoning": d.reasoning,
-            "analyst_signals": {
-                msg.sender.value: {
-                    "signal": msg.signal.value if msg.signal else None,
-                    "confidence": msg.confidence,
-                }
-                for msg in d.analyst_reports
-            },
         }
-        if d.researcher_report:
-            summary["researcher"] = {
-                "signal": d.researcher_report.signal.value if d.researcher_report.signal else None,
-                "confidence": d.researcher_report.confidence,
-            }
-        return summary

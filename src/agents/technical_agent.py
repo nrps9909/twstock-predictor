@@ -8,7 +8,7 @@ import logging
 from src.agents.base import (
     AgentMessage, AgentRole, BaseAgent, MarketContext, Signal,
 )
-from src.utils.config import settings
+from src.utils.llm_client import call_claude, parse_json_response
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +42,6 @@ class TechnicalAgent(BaseAgent):
 
     def __init__(self):
         super().__init__(AgentRole.TECHNICAL)
-        self.api_key = settings.ANTHROPIC_API_KEY
 
     async def analyze(self, context: MarketContext) -> AgentMessage:
         """分析技術指標"""
@@ -81,40 +80,12 @@ class TechnicalAgent(BaseAgent):
         )
 
     async def _call_llm(self, prompt: str) -> dict:
-        """呼叫 Claude Haiku"""
-        import json
-        import httpx
-
-        if not self.api_key:
-            self.logger.warning("未設定 ANTHROPIC_API_KEY，使用規則引擎 fallback")
-            return self._rule_based_analysis()
-
+        """呼叫 Claude Haiku（透過 claude -p CLI）"""
         try:
-            async with httpx.AsyncClient() as client:
-                resp = await client.post(
-                    "https://api.anthropic.com/v1/messages",
-                    headers={
-                        "x-api-key": self.api_key,
-                        "anthropic-version": "2023-06-01",
-                        "content-type": "application/json",
-                    },
-                    json={
-                        "model": "claude-haiku-4-5-20251001",
-                        "max_tokens": 512,
-                        "messages": [{"role": "user", "content": prompt}],
-                    },
-                    timeout=15,
-                )
-                resp.raise_for_status()
-                data = resp.json()
-                text = data["content"][0]["text"].strip()
-                if text.startswith("```"):
-                    text = text.split("```")[1]
-                    if text.startswith("json"):
-                        text = text[4:]
-                return json.loads(text)
+            text = await call_claude(prompt, model="claude-haiku-4-5-20251001", timeout=90)
+            return parse_json_response(text)
         except Exception as e:
-            self.logger.error("LLM 呼叫失敗: %s", e)
+            self.logger.exception("LLM 呼叫失敗 (%s)", type(e).__name__)
             return self._rule_based_analysis()
 
     def _rule_based_analysis(self) -> dict:
