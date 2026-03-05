@@ -252,6 +252,26 @@ class TWSEScanner:
         sellers = sellers.sort_values("trust_cumulative", ascending=True).head(top_n)
         return sellers.to_dict("records")
 
+    def get_trust_info(self, stock_id: str, days: int = 5) -> dict:
+        """取得特定股票的法人籌碼彙總資訊
+
+        Args:
+            stock_id: 股票代號 (e.g. "2330")
+            days: 回看天數
+
+        Returns:
+            dict with keys: foreign_cumulative, trust_cumulative, dealer_cumulative,
+            foreign_consecutive_days, trust_consecutive_days, sync_buy, trade_days
+            若找不到該股票回傳空 dict
+        """
+        agg = self._aggregate_institutional(days)
+        if agg.empty:
+            return {}
+        row = agg[agg["stock_id"] == stock_id]
+        if row.empty:
+            return {}
+        return row.iloc[0].to_dict()
+
     def get_active_universe(self, days: int = 5, top_n: int = 40) -> list[str]:
         """動態股票母體 = 投信買超 top + 原始 STOCK_LIST 聯集
 
@@ -269,6 +289,89 @@ class TWSEScanner:
             logger.error("Failed to get trust top stocks: %s", e)
 
         return sorted(universe)
+
+    def fetch_industry_indices(self) -> dict[str, float]:
+        """抓取 TWSE 產業指數報酬率
+
+        TWSE 公開 API: /rwd/zh/TAIEX/MI_5MINS_INDEX
+        回傳: {semiconductor: return_pct, finance: return_pct, ...}
+        """
+        _rate_limiter.wait()
+
+        url = "https://www.twse.com.tw/rwd/zh/TAIEX/MI_5MINS_INDEX"
+        params = {"response": "json"}
+
+        # TWSE 產業指數名稱 → 內部 sector key
+        INDEX_MAP = {
+            "半導體類報酬指數": "semiconductor",
+            "電子類報酬指數": "electronics",
+            "金融保險類報酬指數": "finance",
+            "航運類報酬指數": "shipping",
+            "生技醫療類報酬指數": "biotech",
+            "電子零組件類報酬指數": "electronics",
+            "半導體類指數": "semiconductor",
+            "電子類指數": "electronics",
+            "金融保險類指數": "finance",
+            "航運類指數": "shipping",
+            "生技醫療類指數": "biotech",
+            "水泥類指數": "traditional",
+            "塑膠類指數": "traditional",
+            "紡織纖維類指數": "traditional",
+            "油電燃氣類指數": "green_energy",
+            "通信網路類指數": "telecom",
+        }
+
+        try:
+            resp = requests.get(url, params=params, timeout=15, verify=False, headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                "Accept": "application/json",
+            })
+            resp.raise_for_status()
+            data = resp.json()
+
+            if data.get("stat") != "OK" or "data" not in data:
+                logger.warning("TWSE MI_5MINS_INDEX: %s", data.get("stat", "no data"))
+                return {}
+
+            result: dict[str, float] = {}
+            rows = data["data"]
+            for row in rows:
+                try:
+                    index_name = row[0].strip()
+                    sector = None
+                    for pattern, sec in INDEX_MAP.items():
+                        if pattern in index_name:
+                            sector = sec
+                            break
+                    if sector is None:
+                        continue
+
+                    # row format: [指數名稱, 指數值, 漲跌點數, 漲跌百分比(%)]
+                    # Some TWSE responses have different column counts
+                    change_pct = None
+                    for col_idx in [3, 2]:
+                        try:
+                            val = str(row[col_idx]).replace(",", "").replace("%", "").strip()
+                            if val and val not in ("--", ""):
+                                change_pct = float(val)
+                                break
+                        except (ValueError, IndexError):
+                            continue
+
+                    if change_pct is not None:
+                        # Keep first match per sector (higher priority index)
+                        if sector not in result:
+                            result[sector] = change_pct / 100.0  # Convert to decimal
+
+                except (ValueError, IndexError):
+                    continue
+
+            logger.info("TWSE industry indices: %s", {k: f"{v:.4f}" for k, v in result.items()})
+            return result
+
+        except Exception as e:
+            logger.warning("TWSE industry indices fetch failed: %s", e)
+            return {}
 
     def get_institutional_summary(self) -> dict:
         """取得今日三大法人整體買賣超概況

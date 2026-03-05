@@ -78,79 +78,80 @@ export interface PredictionResult {
   } | null;
 }
 
-export interface AnalystReport {
-  role: string;
-  signal: string | null;
-  confidence: number;
-  reasoning: string;
-}
+// ── Unified 6-Phase Pipeline Types ─────────────────
 
-export interface AgentDecision {
-  action: string;
-  confidence: number;
-  position_size: number;
-  reasoning: string;
-  approved: boolean;
-  risk_notes: string;
-  analyst_reports: AnalystReport[];
-  researcher: AnalystReport | null;
-}
+export type AnalysisPhase =
+  | "data_collection"
+  | "feature_extraction"
+  | "scoring"
+  | "narrative"
+  | "risk_control"
+  | "finalize";
 
 export interface PipelineEvent {
-  step: string;
+  phase: string;
   status: "running" | "done" | "error" | "skipped";
   progress: number;
   message: string;
   data?: Record<string, unknown>;
 }
 
-export interface PipelineResult {
+export interface FactorDetail {
+  score: number;
+  available: boolean;
+  freshness: number;
+  weight: number;
+  components: Record<string, number>;
+}
+
+export interface ConfidenceBreakdown {
+  confidence_agreement: number;
+  confidence_strength: number;
+  confidence_coverage: number;
+  confidence_freshness: number;
+  risk_discount: number;
+}
+
+export interface NarrativeResult {
+  outlook: string;
+  outlook_horizon: string;
+  key_drivers: string[];
+  risks: string[];
+  catalysts: string[];
+  key_levels: Record<string, number>;
+  position_suggestion: string;
+  source: string;
+}
+
+export interface RiskDecision {
+  action: string;
+  position_size: number;
+  approved: boolean;
+  risk_notes: string[];
+  stop_loss: number | null;
+  take_profit: number | null;
+}
+
+export interface AnalysisResult {
   stock_id: string;
   stock_name: string;
   current_price: number;
+  price_change_pct: number;
+  // Scoring
+  total_score: number;
   signal: string;
   confidence: number;
-  target_price: number;
-  predicted_change: number;
+  confidence_breakdown: ConfidenceBreakdown;
+  factor_details: Record<string, FactorDetail>;
+  regime: string;
   reasoning: string;
-  technical: {
-    signals: TechnicalSignals;
-    indicators: Record<string, number | null>;
-    current_price: number;
-  };
-  sentiment: SentimentSummary;
-  prediction: PredictionResult | null;
-  agent: AgentDecision | null;
-}
-
-// Agent sub-step events (emitted during step 8)
-export type AgentSubstep =
-  | "analysts_start"
-  | "analyst_done"
-  | "debate_start"
-  | "debate_round"
-  | "debate_synthesis"
-  | "rule_engine"
-  | "risk_check";
-
-export interface AgentSubEvent {
-  substep: AgentSubstep;
-  // analyst_done
-  role?: string;
-  signal?: string;
-  confidence?: number;
-  error?: string;
-  // debate_round
-  round?: number;
-  bull_args?: string[];
-  bear_args?: string[];
-  // analysts_start
-  count?: number;
-  // rule_engine
-  action?: string;
-  // risk_check
-  approved?: boolean;
-  notes?: string;
+  // Narrative
+  narrative: NarrativeResult;
+  // Risk
+  risk_decision: RiskDecision;
+  // Metadata
+  analysis_date: string;
+  pipeline_version: string;
 }
 
 export interface PredictionRecord {
@@ -208,13 +209,7 @@ export interface StockScanResult {
   risk_discount?: number;
   // Regime + factor details
   market_regime?: string;
-  factor_details?: Record<string, {
-    score: number;
-    available: boolean;
-    freshness: number;
-    weight: number;
-    components: Record<string, number>;
-  }>;
+  factor_details?: Record<string, FactorDetail>;
 }
 
 export interface FactorICData {
@@ -303,26 +298,3 @@ export interface MarketScanEvent {
   message: string;
   data?: Record<string, unknown>;
 }
-
-export type PipelineStep =
-  | "check_data"
-  | "fetch_data"
-  | "technical"
-  | "sentiment"
-  | "check_model"
-  | "train_model"
-  | "predict"
-  | "agent"
-  | "synthesize";
-
-export const PIPELINE_STEPS: { key: PipelineStep; label: string }[] = [
-  { key: "check_data", label: "檢查資料" },
-  { key: "fetch_data", label: "抓取資料" },
-  { key: "technical", label: "技術分析" },
-  { key: "sentiment", label: "情緒分析" },
-  { key: "check_model", label: "檢查模型" },
-  { key: "train_model", label: "訓練模型" },
-  { key: "predict", label: "ML 預測" },
-  { key: "agent", label: "Agent 分析" },
-  { key: "synthesize", label: "彙整結果" },
-];

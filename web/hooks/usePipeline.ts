@@ -2,33 +2,31 @@
 
 import { useState, useCallback, useRef } from "react";
 import { api } from "@/lib/api";
-import type { PipelineEvent, PipelineStep, PipelineResult, AgentSubEvent } from "@/lib/types";
+import type { PipelineEvent, AnalysisPhase, AnalysisResult } from "@/lib/types";
 
 export type PipelineState = "idle" | "running" | "complete" | "error";
 
-interface StepState {
+export interface PhaseState {
   status: "pending" | "running" | "done" | "error" | "skipped";
   message: string;
   data?: Record<string, unknown>;
 }
 
+const INITIAL_PHASES: Record<AnalysisPhase, PhaseState> = {
+  data_collection: { status: "pending", message: "" },
+  feature_extraction: { status: "pending", message: "" },
+  scoring: { status: "pending", message: "" },
+  narrative: { status: "pending", message: "" },
+  risk_control: { status: "pending", message: "" },
+  finalize: { status: "pending", message: "" },
+};
+
 export function usePipeline() {
   const [state, setState] = useState<PipelineState>("idle");
   const [progress, setProgress] = useState(0);
-  const [steps, setSteps] = useState<Record<PipelineStep, StepState>>({
-    check_data: { status: "pending", message: "" },
-    fetch_data: { status: "pending", message: "" },
-    technical: { status: "pending", message: "" },
-    sentiment: { status: "pending", message: "" },
-    check_model: { status: "pending", message: "" },
-    train_model: { status: "pending", message: "" },
-    predict: { status: "pending", message: "" },
-    agent: { status: "pending", message: "" },
-    synthesize: { status: "pending", message: "" },
-  });
-  const [result, setResult] = useState<PipelineResult | null>(null);
+  const [phases, setPhases] = useState<Record<AnalysisPhase, PhaseState>>({ ...INITIAL_PHASES });
+  const [result, setResult] = useState<AnalysisResult | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [agentSubEvents, setAgentSubEvents] = useState<AgentSubEvent[]>([]);
   const controllerRef = useRef<AbortController | null>(null);
 
   const reset = useCallback(() => {
@@ -36,21 +34,10 @@ export function usePipeline() {
     setProgress(0);
     setResult(null);
     setError(null);
-    setAgentSubEvents([]);
-    setSteps({
-      check_data: { status: "pending", message: "" },
-      fetch_data: { status: "pending", message: "" },
-      technical: { status: "pending", message: "" },
-      sentiment: { status: "pending", message: "" },
-      check_model: { status: "pending", message: "" },
-      train_model: { status: "pending", message: "" },
-      predict: { status: "pending", message: "" },
-      agent: { status: "pending", message: "" },
-      synthesize: { status: "pending", message: "" },
-    });
+    setPhases({ ...INITIAL_PHASES });
   }, []);
 
-  const run = useCallback((stockId: string, opts?: { forceRetrain?: boolean }) => {
+  const run = useCallback((stockId: string) => {
     // Abort previous run
     if (controllerRef.current) {
       controllerRef.current.abort();
@@ -62,36 +49,33 @@ export function usePipeline() {
     const controller = api.runPipeline(
       stockId,
       (event: PipelineEvent) => {
-        const step = event.step as PipelineStep;
         setProgress(event.progress);
 
-        setSteps((prev) => ({
-          ...prev,
-          [step]: {
-            status: event.status,
-            message: event.message,
-            data: event.data,
-          },
-        }));
-
-        // Accumulate agent sub-events
-        if (step === "agent" && event.data?.substep) {
-          setAgentSubEvents((prev) => [...prev, event.data as unknown as AgentSubEvent]);
+        // Update phase state (skip "complete" pseudo-phase)
+        if (event.phase !== "complete") {
+          const phase = event.phase as AnalysisPhase;
+          setPhases((prev) => ({
+            ...prev,
+            [phase]: {
+              status: event.status,
+              message: event.message,
+              data: event.data,
+            },
+          }));
         }
 
         // Check for completion
-        if (step === "synthesize" && event.status === "done" && event.data) {
+        if (event.phase === "complete" && event.status === "done" && event.data) {
           setState("complete");
-          setResult(event.data as unknown as PipelineResult);
+          setResult(event.data as unknown as AnalysisResult);
         }
 
         // Check for terminal error
-        if (step === "synthesize" && event.status === "error") {
+        if (event.phase === "complete" && event.status === "error") {
           setState("error");
-          setError(event.message);
+          setError(event.data?.error as string || event.message);
         }
       },
-      { forceRetrain: opts?.forceRetrain },
     );
 
     controllerRef.current = controller;
@@ -108,10 +92,9 @@ export function usePipeline() {
   return {
     state,
     progress,
-    steps,
+    phases,
     result,
     error,
-    agentSubEvents,
     run,
     abort,
     reset,

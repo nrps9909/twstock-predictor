@@ -1,8 +1,4 @@
-"""共用 LLM client — Anthropic SDK 優先，claude -p CLI 作為 fallback
-
-優先級：
-1. Anthropic Python SDK（需要有效的 ANTHROPIC_API_KEY）
-2. claude -p CLI（使用 Claude Code 訂閱認證）
+"""共用 LLM client — 僅使用 claude -p CLI（Claude Code 訂閱認證）
 
 Server 啟動時（api/main.py）會移除 CLAUDECODE 環境變數，
 確保 claude -p 不會被巢狀 session 偵測擋住。
@@ -17,24 +13,6 @@ import shutil
 import subprocess
 
 logger = logging.getLogger(__name__)
-
-# ── 嘗試初始化 Anthropic SDK ───────────────────────────
-_sync_client = None
-_async_client = None
-_use_sdk = False
-
-try:
-    import anthropic
-    from src.utils.config import settings
-
-    _api_key = settings.ANTHROPIC_API_KEY
-    if _api_key:
-        _sync_client = anthropic.Anthropic(api_key=_api_key)
-        _async_client = anthropic.AsyncAnthropic(api_key=_api_key)
-        _use_sdk = True
-        logger.info("llm_client: Anthropic SDK 已初始化 (key=%s...)", _api_key[:12])
-except ImportError:
-    logger.info("llm_client: anthropic SDK 未安裝")
 
 # ── Claude CLI ─────────────────────────────────────────
 _CLAUDE_PATH: str = shutil.which("claude") or "claude"
@@ -116,42 +94,6 @@ def _call_cli_sync(
         raise TimeoutError(f"claude -p 逾時 ({timeout}s)")
 
 
-def _call_sdk_sync(
-    prompt: str,
-    model: str,
-    timeout: float,
-    system_prompt: str,
-) -> str:
-    """透過 Anthropic SDK 呼叫"""
-    response = _sync_client.messages.create(
-        model=model,
-        max_tokens=4096,
-        system=system_prompt,
-        messages=[{"role": "user", "content": prompt}],
-        timeout=timeout,
-    )
-    return response.content[0].text
-
-
-async def _call_sdk_async(
-    prompt: str,
-    model: str,
-    timeout: float,
-    system_prompt: str,
-) -> str:
-    """透過 Anthropic AsyncClient 呼叫"""
-    response = await asyncio.wait_for(
-        _async_client.messages.create(
-            model=model,
-            max_tokens=4096,
-            system=system_prompt,
-            messages=[{"role": "user", "content": prompt}],
-        ),
-        timeout=timeout,
-    )
-    return response.content[0].text
-
-
 # ── Public API ─────────────────────────────────────────
 
 async def call_claude(
@@ -160,23 +102,10 @@ async def call_claude(
     timeout: float = 60,
     system_prompt: str = "You are a JSON API. Return ONLY valid JSON. No markdown fences, no explanation.",
 ) -> str:
-    """Async: 呼叫 Claude（SDK 優先，CLI fallback）
+    """Async: 呼叫 Claude（透過 CLI）
 
     預設 timeout 60s（CLI 冷啟動約需 20-40s）。
     """
-    global _use_sdk
-
-    if _use_sdk:
-        try:
-            return await _call_sdk_async(prompt, model, timeout, system_prompt)
-        except Exception as e:
-            err_str = str(e).lower()
-            if "authentication" in err_str or "401" in err_str:
-                logger.warning("SDK 認證失敗，切換 CLI: %s", e)
-                _use_sdk = False
-            else:
-                raise
-
     return await asyncio.to_thread(
         _call_cli_sync, prompt, model, timeout, system_prompt,
     )
@@ -188,51 +117,18 @@ def call_claude_sync(
     timeout: float = 60,
     system_prompt: str = "You are a JSON API. Return ONLY valid JSON. No markdown fences, no explanation.",
 ) -> str:
-    """Sync: 呼叫 Claude（SDK 優先，CLI fallback）
+    """Sync: 呼叫 Claude（透過 CLI）
 
     預設 timeout 60s（CLI 冷啟動約需 20-40s）。
     """
-    global _use_sdk
-
-    if _use_sdk:
-        try:
-            return _call_sdk_sync(prompt, model, timeout, system_prompt)
-        except Exception as e:
-            err_str = str(e).lower()
-            if "authentication" in err_str or "401" in err_str:
-                logger.warning("SDK 認證失敗，切換 CLI: %s", e)
-                _use_sdk = False
-            else:
-                raise
-
     return _call_cli_sync(prompt, model, timeout, system_prompt)
 
 
 def check_claude_available() -> bool:
-    """檢查 LLM 是否可用（server 啟動時呼叫一次）
+    """檢查 CLI 是否可用（server 啟動時呼叫一次）
 
-    只做輕量檢查（SDK ping / CLI --version），不做完整 API 呼叫。
-    實際 API 可用性由第一次真實呼叫決定。
+    只做輕量檢查（CLI --version），不做完整 API 呼叫。
     """
-    global _use_sdk
-
-    # 1. 試 SDK（輕量 ping）
-    if _sync_client is not None:
-        try:
-            response = _sync_client.messages.create(
-                model="claude-haiku-4-5-20251001",
-                max_tokens=16,
-                messages=[{"role": "user", "content": "ping"}],
-                timeout=15,
-            )
-            _use_sdk = True
-            logger.info("LLM 就緒: Anthropic SDK (model: %s)", response.model)
-            return True
-        except Exception as exc:
-            logger.warning("Anthropic SDK 驗證失敗: %s", exc)
-            _use_sdk = False
-
-    # 2. CLI: 只檢查 --version（快速，不做 API 呼叫）
     try:
         result = subprocess.run(
             [_CLAUDE_PATH, "--version"],
@@ -253,9 +149,8 @@ def check_claude_available() -> bool:
         logger.warning("claude CLI 檢查失敗: %s", exc)
 
     logger.warning(
-        "LLM 不可用: SDK 認證失敗且 CLI 未找到。"
-        "請確認 .env 中的 ANTHROPIC_API_KEY 有效，"
-        "或安裝 claude CLI。"
+        "LLM 不可用: claude CLI 未找到。"
+        "請安裝 claude CLI (npm install -g @anthropic-ai/claude-code)。"
     )
     return False
 

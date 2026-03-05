@@ -141,7 +141,7 @@ class TechnicalAnalyzer:
         signals = {}
         score = 0  # 正=偏多, 負=偏空
 
-        # KD 訊號
+        # KD 訊號 (含漸進式評分)
         k, d = latest.get("kd_k", 50), latest.get("kd_d", 50)
         if k < 20 and d < 20:
             signals["kd"] = {"signal": "buy", "reason": f"KD 超賣區 (K={k:.1f}, D={d:.1f})"}
@@ -155,10 +155,22 @@ class TechnicalAnalyzer:
         elif len(df) >= 2 and df.iloc[-2]["kd_k"] > df.iloc[-2]["kd_d"] and k < d:
             signals["kd"] = {"signal": "sell", "reason": "KD 死亡交叉"}
             score -= 1
+        elif k < 30:
+            signals["kd"] = {"signal": "weak_buy", "reason": f"KD 偏低 (K={k:.1f}, D={d:.1f})"}
+            score += 0.5
+        elif k > 70:
+            signals["kd"] = {"signal": "weak_sell", "reason": f"KD 偏高 (K={k:.1f}, D={d:.1f})"}
+            score -= 0.5
+        elif k > d and (k - d) > 5:
+            signals["kd"] = {"signal": "weak_buy", "reason": f"K 在 D 上方 (K={k:.1f}, D={d:.1f})"}
+            score += 0.3
+        elif d > k and (d - k) > 5:
+            signals["kd"] = {"signal": "weak_sell", "reason": f"D 在 K 上方 (K={k:.1f}, D={d:.1f})"}
+            score -= 0.3
         else:
             signals["kd"] = {"signal": "neutral", "reason": f"KD 中性 (K={k:.1f}, D={d:.1f})"}
 
-        # RSI 訊號
+        # RSI 訊號 (含漸進式評分)
         rsi_val = latest.get("rsi_14", 50)
         if rsi_val < 30:
             signals["rsi"] = {"signal": "buy", "reason": f"RSI 超賣 ({rsi_val:.1f})"}
@@ -166,10 +178,16 @@ class TechnicalAnalyzer:
         elif rsi_val > 70:
             signals["rsi"] = {"signal": "sell", "reason": f"RSI 超買 ({rsi_val:.1f})"}
             score -= 1
+        elif rsi_val < 40:
+            signals["rsi"] = {"signal": "weak_buy", "reason": f"RSI 偏低 ({rsi_val:.1f})"}
+            score += 0.5
+        elif rsi_val > 60:
+            signals["rsi"] = {"signal": "weak_sell", "reason": f"RSI 偏高 ({rsi_val:.1f})"}
+            score -= 0.5
         else:
             signals["rsi"] = {"signal": "neutral", "reason": f"RSI 中性 ({rsi_val:.1f})"}
 
-        # MACD 訊號
+        # MACD 訊號 (含動能方向評分)
         macd_val = latest.get("macd", 0)
         macd_sig = latest.get("macd_signal", 0)
         macd_hist = latest.get("macd_hist", 0)
@@ -181,13 +199,20 @@ class TechnicalAnalyzer:
             elif prev_hist > 0 and macd_hist < 0:
                 signals["macd"] = {"signal": "sell", "reason": "MACD 柱狀體翻負（空方動能增強）"}
                 score -= 1
+            elif macd_hist > 0 and macd_hist > prev_hist:
+                signals["macd"] = {"signal": "weak_buy", "reason": "MACD 多方動能增強中"}
+                score += 0.3
+            elif macd_hist < 0 and macd_hist < prev_hist:
+                signals["macd"] = {"signal": "weak_sell", "reason": "MACD 空方動能增強中"}
+                score -= 0.3
+            elif macd_hist > 0:
+                signals["macd"] = {"signal": "neutral", "reason": "MACD 多方持續（動能減弱）"}
             else:
-                direction = "多方" if macd_hist > 0 else "空方"
-                signals["macd"] = {"signal": "neutral", "reason": f"MACD {direction}持續"}
+                signals["macd"] = {"signal": "neutral", "reason": "MACD 空方持續（動能減弱）"}
         else:
             signals["macd"] = {"signal": "neutral", "reason": "MACD 資料不足"}
 
-        # 乖離率 BIAS 訊號（以 10日 為主）
+        # 乖離率 BIAS 訊號（以 10日 為主，含漸進式評分）
         bias_10 = latest.get("bias_10", 0)
         if bias_10 < -3:
             signals["bias"] = {"signal": "buy", "reason": f"10日乖離率過低 ({bias_10:.2f}%)"}
@@ -195,10 +220,16 @@ class TechnicalAnalyzer:
         elif bias_10 > 3:
             signals["bias"] = {"signal": "sell", "reason": f"10日乖離率過高 ({bias_10:.2f}%)"}
             score -= 1
+        elif bias_10 < -1.5:
+            signals["bias"] = {"signal": "weak_buy", "reason": f"乖離率偏低 ({bias_10:.2f}%)"}
+            score += 0.3
+        elif bias_10 > 1.5:
+            signals["bias"] = {"signal": "weak_sell", "reason": f"乖離率偏高 ({bias_10:.2f}%)"}
+            score -= 0.3
         else:
             signals["bias"] = {"signal": "neutral", "reason": f"乖離率正常 ({bias_10:.2f}%)"}
 
-        # 布林通道 BB 訊號
+        # 布林通道 BB 訊號 (含漸進式評分)
         bb_pband = latest.get("bb_pband", 0.5)
         if bb_pband < 0:
             signals["bb"] = {"signal": "buy", "reason": "價格跌破布林下軌"}
@@ -206,15 +237,25 @@ class TechnicalAnalyzer:
         elif bb_pband > 1:
             signals["bb"] = {"signal": "sell", "reason": "價格突破布林上軌"}
             score -= 1
+        elif bb_pband < 0.15:
+            signals["bb"] = {"signal": "weak_buy", "reason": f"價格接近布林下軌 (%B={bb_pband:.2f})"}
+            score += 0.5
+        elif bb_pband > 0.85:
+            signals["bb"] = {"signal": "weak_sell", "reason": f"價格接近布林上軌 (%B={bb_pband:.2f})"}
+            score -= 0.5
         else:
             signals["bb"] = {"signal": "neutral", "reason": f"布林通道內 (%B={bb_pband:.2f})"}
 
-        # 綜合訊號
+        # 綜合訊號 (漸進式分數，閾值配合 fractional scores)
         total_indicators = 5
-        if score >= 2:
+        if score >= 1.5:
             summary_signal = "buy"
-        elif score <= -2:
+        elif score <= -1.5:
             summary_signal = "sell"
+        elif score >= 0.5:
+            summary_signal = "weak_buy"
+        elif score <= -0.5:
+            summary_signal = "weak_sell"
         else:
             summary_signal = "hold"
 

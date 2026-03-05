@@ -1,21 +1,25 @@
 "use client";
 
-import type { PipelineResult } from "@/lib/types";
-import { SIGNAL_COLORS, SIGNAL_LABELS, STOCK_LIST } from "@/lib/constants";
-import { formatPrice, formatPercent } from "@/lib/utils";
+import type { AnalysisResult } from "@/lib/types";
+import { SIGNAL_COLORS, SIGNAL_LABELS, STOCK_LIST, REGIME_LABELS } from "@/lib/constants";
 import { TrendingUp, TrendingDown, Minus, Shield, ShieldOff } from "lucide-react";
 
 interface SummaryStripProps {
-  result: PipelineResult;
+  result: AnalysisResult;
 }
 
 export function SummaryStrip({ result }: SummaryStripProps) {
   const signal = result.signal || "hold";
   const signalColor = SIGNAL_COLORS[signal as keyof typeof SIGNAL_COLORS] || SIGNAL_COLORS.hold;
   const signalLabel = SIGNAL_LABELS[signal] || signal;
-  const change = result.predicted_change || 0;
-  const approved = result.agent?.approved;
-  const positionSize = result.agent?.position_size;
+  const approved = result.risk_decision?.approved;
+  const positionSize = result.risk_decision?.position_size;
+  const regime = result.regime || "sideways";
+  const regimeColor = regime === "bull"
+    ? "#EF5350"
+    : regime === "bear"
+    ? "#26A69A"
+    : "#FFC107";
 
   const SignalIcon = signal.includes("buy")
     ? TrendingUp
@@ -67,21 +71,49 @@ export function SummaryStrip({ result }: SummaryStripProps) {
           </div>
         </div>
 
-        {/* Price → Target */}
+        {/* Total Score */}
         <div className="shrink-0">
           <div className="text-[9px] tracking-wider" style={{ color: "var(--text-muted)" }}>
-            現價 → 目標
+            總分
+          </div>
+          <div className="font-num text-sm font-bold" style={{ color: "var(--text-primary)" }}>
+            {result.total_score.toFixed(2)}
+          </div>
+        </div>
+
+        {/* Current Price */}
+        <div className="shrink-0">
+          <div className="text-[9px] tracking-wider" style={{ color: "var(--text-muted)" }}>
+            現價
           </div>
           <div className="font-num text-sm font-medium" style={{ color: "var(--text-primary)" }}>
-            ${formatPrice(result.current_price)}
-            <span style={{ color: "var(--text-muted)" }}> → </span>
-            <span style={{ color: change >= 0 ? "var(--signal-buy)" : "var(--signal-sell)" }}>
-              ${formatPrice(result.target_price)}
-            </span>
-            <span className="ml-1 text-xs" style={{ color: change >= 0 ? "var(--signal-buy)" : "var(--signal-sell)" }}>
-              {formatPercent(change)}
-            </span>
+            ${result.current_price.toFixed(1)}
+            {result.price_change_pct !== 0 && (
+              <span
+                className="ml-1 text-xs"
+                style={{ color: result.price_change_pct >= 0 ? "var(--signal-buy)" : "var(--signal-sell)" }}
+              >
+                {result.price_change_pct >= 0 ? "+" : ""}{result.price_change_pct.toFixed(2)}%
+              </span>
+            )}
           </div>
+        </div>
+
+        {/* Regime badge */}
+        <div className="shrink-0">
+          <div className="text-[9px] tracking-wider" style={{ color: "var(--text-muted)" }}>
+            體制
+          </div>
+          <span
+            className="inline-block rounded-md px-2 py-0.5 text-[10px] font-bold"
+            style={{
+              background: `${regimeColor}12`,
+              color: regimeColor,
+              border: `1px solid ${regimeColor}25`,
+            }}
+          >
+            {REGIME_LABELS[regime] || regime}
+          </span>
         </div>
 
         {/* Risk approval */}

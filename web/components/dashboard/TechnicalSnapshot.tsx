@@ -1,7 +1,7 @@
 "use client";
 
 import type { TechnicalSignals } from "@/lib/types";
-import { SIGNAL_COLORS } from "@/lib/constants";
+import { SIGNAL_COLORS, SIGNAL_LABELS } from "@/lib/constants";
 import { Activity } from "lucide-react";
 
 interface TechnicalSnapshotProps {
@@ -70,7 +70,8 @@ export function TechnicalSnapshot({ signals, indicators }: TechnicalSnapshotProp
         {signalEntries.map(([key, sig]) => {
           const s = sig as { signal: string; reason: string };
           const color = SIGNAL_COLORS[s.signal as keyof typeof SIGNAL_COLORS] || "rgba(139,144,160,0.5)";
-          const label = s.signal === "buy" ? "BUY" : s.signal === "sell" ? "SELL" : "HOLD";
+          const labelMap: Record<string, string> = { buy: "BUY", weak_buy: "W.BUY", sell: "SELL", weak_sell: "W.SELL", hold: "HOLD", neutral: "HOLD" };
+          const label = labelMap[s.signal] || "HOLD";
 
           return (
             <div key={key} className="flex items-center justify-between group">

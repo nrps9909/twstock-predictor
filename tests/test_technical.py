@@ -79,7 +79,7 @@ class TestTechnicalAnalyzer:
         assert "rsi" in signals
         assert "macd" in signals
         assert "summary" in signals
-        assert signals["summary"]["signal"] in ("buy", "sell", "hold")
+        assert signals["summary"]["signal"] in ("buy", "sell", "hold", "weak_buy", "weak_sell")
 
     def test_generate_chart_data(self, sample_data):
         result = self.analyzer.compute_all(sample_data)

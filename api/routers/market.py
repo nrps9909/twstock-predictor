@@ -127,6 +127,7 @@ async def trigger_pipeline(stock_id: str, background_tasks: BackgroundTasks):
 @router.post("/analyze/{stock_id}")
 async def analyze_stock(stock_id: str, stock_name: str = ""):
     """統一個股深度分析 (SSE 串流) — 6 階段管線"""
+    logger.info("▶ POST /api/market/analyze/%s (name=%s)", stock_id, stock_name or "auto")
     from api.services.stock_analysis_service import analyze_stock as _analyze
     return StreamingResponse(
         _analyze(stock_id, stock_name),

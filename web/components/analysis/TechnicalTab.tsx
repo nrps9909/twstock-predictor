@@ -1,7 +1,7 @@
 "use client";
 
 import dynamic from "next/dynamic";
-import type { PipelineResult, TechnicalResult } from "@/lib/types";
+import type { TechnicalResult } from "@/lib/types";
 import { TechnicalSnapshot } from "@/components/dashboard/TechnicalSnapshot";
 import { TechnicalIndicators } from "@/components/charts/TechnicalIndicators";
 import { RadarChart } from "@/components/charts/RadarChart";
@@ -22,14 +22,23 @@ function ChartLoading() {
 }
 
 interface TechnicalTabProps {
-  result: PipelineResult;
   technicalData: TechnicalResult | null;
 }
 
-export function TechnicalTab({ result, technicalData }: TechnicalTabProps) {
+export function TechnicalTab({ technicalData }: TechnicalTabProps) {
   const chartData = technicalData?.chart_data || [];
-  const indicators = result.technical?.indicators || {};
-  const signals = result.technical?.signals;
+  const indicators = technicalData?.indicators || {};
+  const signals = technicalData?.signals;
+
+  if (!technicalData) {
+    return (
+      <div className="glass-card p-8 text-center">
+        <p className="text-sm" style={{ color: "var(--text-muted)" }}>
+          技術分析資料載入中...
+        </p>
+      </div>
+    );
+  }
 
   // Build radar data from signals
   const radarData = signals
@@ -37,7 +46,8 @@ export function TechnicalTab({ result, technicalData }: TechnicalTabProps) {
         .filter(([k, v]) => k !== "summary" && v != null)
         .map(([k, v]) => {
           const s = v as { signal: string };
-          const score = s.signal === "buy" ? 80 : s.signal === "sell" ? 20 : 50;
+          const scoreMap: Record<string, number> = { buy: 90, weak_buy: 70, neutral: 50, weak_sell: 30, sell: 10 };
+          const score = scoreMap[s.signal] ?? 50;
           return { name: k.toUpperCase(), value: score, fullMark: 100 };
         })
     : [];

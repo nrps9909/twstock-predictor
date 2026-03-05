@@ -166,6 +166,44 @@ def _compute_weights(factors: list[FactorResult], regime: str) -> dict[str, floa
 _global_cache: dict = {"date": None, "data": None}
 _macro_cache: dict = {"date": None, "data": None}
 
+# yfinance fallback ticker mapping — 主要 ticker 失敗時嘗試替代
+_FALLBACK_TICKERS = {
+    "^SOX": "SOXX",      # SOX ETF 替代
+    "EWT": "0050.TW",    # 台灣50替代
+    "^VIX": "VIXY",      # VIX ETF 替代
+    "XLI": "IYJ",        # 工業 ETF 替代
+    "TSM": "2330.TW",    # 台積電本地替代
+    "ASML": "ASML.AS",   # ASML 歐洲替代
+    "^TNX": "TLT",       # 美債 ETF (反向推算)
+    "^FVX": "IEF",       # 中期美債 ETF
+}
+
+
+def _fetch_yfinance_with_fallback(ticker: str, period: str = "5d"):
+    """yfinance 抓取 + fallback ticker 機制"""
+    import yfinance as yf
+    try:
+        t = yf.Ticker(ticker)
+        hist = t.history(period=period)
+        if hist is not None and len(hist) >= 1:
+            return hist
+    except Exception as e:
+        logger.warning("yfinance %s primary fetch failed: %s", ticker, e)
+
+    # Try fallback
+    fallback = _FALLBACK_TICKERS.get(ticker)
+    if fallback:
+        try:
+            t = yf.Ticker(fallback)
+            hist = t.history(period=period)
+            if hist is not None and len(hist) >= 1:
+                logger.info("yfinance %s → fallback %s succeeded", ticker, fallback)
+                return hist
+        except Exception as e:
+            logger.warning("yfinance %s fallback %s also failed: %s", ticker, fallback, e)
+
+    return pd.DataFrame()
+
 
 def _fetch_global_market_data() -> dict:
     """取得前一交易日全球市場數據 (yfinance), 每日快取
@@ -180,50 +218,73 @@ def _fetch_global_market_data() -> dict:
     try:
         import yfinance as yf
         for ticker, key in [("^SOX", "sox"), ("TSM", "tsm")]:
-            try:
-                t = yf.Ticker(ticker)
-                hist = t.history(period="5d")
-                if len(hist) >= 2:
-                    prev_close = float(hist["Close"].iloc[-2])
-                    last_close = float(hist["Close"].iloc[-1])
-                    result[f"{key}_return"] = (last_close - prev_close) / prev_close
-                else:
-                    result[f"{key}_return"] = 0.0
-            except Exception:
+            hist = _fetch_yfinance_with_fallback(ticker, "5d")
+            if len(hist) >= 2:
+                prev_close = float(hist["Close"].iloc[-2])
+                last_close = float(hist["Close"].iloc[-1])
+                result[f"{key}_return"] = (last_close - prev_close) / prev_close
+            else:
                 result[f"{key}_return"] = 0.0
+                logger.warning("yfinance %s: insufficient data (< 2 rows)", ticker)
 
         # EWT (iShares MSCI Taiwan ETF) — 出口動能代理指標
-        try:
-            ewt = yf.Ticker("EWT")
-            hist = ewt.history(period="90d")
-            if len(hist) >= 2:
-                last_close = float(hist["Close"].iloc[-1])
-                prev_close = float(hist["Close"].iloc[-2])
-                result["ewt_return_1d"] = (last_close - prev_close) / prev_close
-            else:
-                result["ewt_return_1d"] = 0.0
-            if len(hist) >= 21:
-                close_20d_ago = float(hist["Close"].iloc[-21])
-                result["ewt_return_20d"] = (last_close - close_20d_ago) / close_20d_ago
-            else:
-                result["ewt_return_20d"] = 0.0
-            if len(hist) >= 61:
-                close_60d_ago = float(hist["Close"].iloc[-61])
-                result["ewt_return_60d"] = (last_close - close_60d_ago) / close_60d_ago
-            else:
-                result["ewt_return_60d"] = 0.0
-        except Exception:
+        hist = _fetch_yfinance_with_fallback("EWT", "90d")
+        if len(hist) >= 2:
+            last_close = float(hist["Close"].iloc[-1])
+            prev_close = float(hist["Close"].iloc[-2])
+            result["ewt_return_1d"] = (last_close - prev_close) / prev_close
+        else:
             result["ewt_return_1d"] = 0.0
+            last_close = 0.0
+        if len(hist) >= 21:
+            close_20d_ago = float(hist["Close"].iloc[-21])
+            result["ewt_return_20d"] = (last_close - close_20d_ago) / close_20d_ago
+        else:
             result["ewt_return_20d"] = 0.0
+        if len(hist) >= 61:
+            close_60d_ago = float(hist["Close"].iloc[-61])
+            result["ewt_return_60d"] = (last_close - close_60d_ago) / close_60d_ago
+        else:
             result["ewt_return_60d"] = 0.0
 
-    except Exception:
+        # 0050.TW (元大台灣50) — 本地替代 / EWT fallback
+        hist = _fetch_yfinance_with_fallback("0050.TW", "90d")
+        if len(hist) >= 21:
+            tw50_last = float(hist["Close"].iloc[-1])
+            close_20d_ago = float(hist["Close"].iloc[-21])
+            result["tw50_return_20d"] = (tw50_last - close_20d_ago) / close_20d_ago
+        else:
+            result["tw50_return_20d"] = 0.0
+        if len(hist) >= 61:
+            close_60d_ago = float(hist["Close"].iloc[-61])
+            result["tw50_return_60d"] = (tw50_last - close_60d_ago) / close_60d_ago
+        else:
+            result["tw50_return_60d"] = 0.0
+
+        # ASML (半導體設備領先指標)
+        hist = _fetch_yfinance_with_fallback("ASML", "5d")
+        if len(hist) >= 2:
+            prev_close = float(hist["Close"].iloc[-2])
+            last_close = float(hist["Close"].iloc[-1])
+            result["asml_return"] = (last_close - prev_close) / prev_close
+        else:
+            result["asml_return"] = 0.0
+
+    except Exception as e:
         result["sox_return"] = 0.0
         result["tsm_return"] = 0.0
         result["ewt_return_1d"] = 0.0
         result["ewt_return_20d"] = 0.0
         result["ewt_return_60d"] = 0.0
+        result["tw50_return_20d"] = 0.0
+        result["tw50_return_60d"] = 0.0
+        result["asml_return"] = 0.0
+        logger.warning("yfinance global import/init failed: %s", e)
 
+    logger.info("Global market data: SOX=%.4f TSM=%.4f EWT_20d=%.4f TW50_20d=%.4f ASML=%.4f",
+                result.get("sox_return", 0), result.get("tsm_return", 0),
+                result.get("ewt_return_20d", 0), result.get("tw50_return_20d", 0),
+                result.get("asml_return", 0))
     _global_cache["date"] = today
     _global_cache["data"] = result
     return result
@@ -240,14 +301,10 @@ def _fetch_macro_data() -> dict:
         import yfinance as yf
 
         # VIX
-        try:
-            vix = yf.Ticker("^VIX")
-            hist = vix.history(period="5d")
-            if len(hist) >= 1:
-                result["vix"] = float(hist["Close"].iloc[-1])
-            else:
-                result["vix"] = 20.0
-        except Exception:
+        hist = _fetch_yfinance_with_fallback("^VIX", "5d")
+        if len(hist) >= 1:
+            result["vix"] = float(hist["Close"].iloc[-1])
+        else:
             result["vix"] = 20.0
 
         # USD/TWD 匯率 30 日趨勢
@@ -260,47 +317,75 @@ def _fetch_macro_data() -> dict:
                 result["usdtwd_trend"] = (recent - prior) / prior
             else:
                 result["usdtwd_trend"] = 0.0
-        except Exception:
+        except Exception as e:
             result["usdtwd_trend"] = 0.0
+            logger.warning("yfinance TWD=X fetch failed: %s", e)
 
         # 美國 10Y 殖利率 30 日變化
-        try:
-            tnx = yf.Ticker("^TNX")
-            hist = tnx.history(period="35d")
-            if len(hist) >= 20:
-                recent = float(hist["Close"].tail(5).mean())
-                prior = float(hist["Close"].tail(30).head(10).mean())
-                result["tnx_change"] = recent - prior
-            else:
-                result["tnx_change"] = 0.0
-        except Exception:
+        tnx_hist_full = _fetch_yfinance_with_fallback("^TNX", "35d")
+        if len(tnx_hist_full) >= 20:
+            recent = float(tnx_hist_full["Close"].tail(5).mean())
+            prior = float(tnx_hist_full["Close"].tail(30).head(10).mean())
+            result["tnx_change"] = recent - prior
+        else:
             result["tnx_change"] = 0.0
 
         # XLI (工業 ETF) — 製造業景氣代理指標
+        hist = _fetch_yfinance_with_fallback("XLI", "250d")
+        if len(hist) >= 21:
+            last_close = float(hist["Close"].iloc[-1])
+            close_20d_ago = float(hist["Close"].iloc[-21])
+            result["xli_return_20d"] = (last_close - close_20d_ago) / close_20d_ago
+        else:
+            result["xli_return_20d"] = 0.0
+        if len(hist) >= 200:
+            sma200 = float(hist["Close"].tail(200).mean())
+            last_close = float(hist["Close"].iloc[-1])
+            result["xli_vs_sma200"] = (last_close - sma200) / sma200
+        else:
+            result["xli_vs_sma200"] = 0.0
+
+        # ^FVX (5Y Treasury) — 殖利率曲線近似 (TNX - FVX)
+        fvx_hist = _fetch_yfinance_with_fallback("^FVX", "35d")
+        if len(fvx_hist) >= 5:
+            result["fvx"] = float(fvx_hist["Close"].iloc[-1])
+            # Yield curve spread: 10Y - 5Y (positive = normal, negative = inversion)
+            if len(tnx_hist_full) >= 1:
+                tnx_level = float(tnx_hist_full["Close"].iloc[-1])
+                fvx_level = float(fvx_hist["Close"].iloc[-1])
+                result["yield_curve_spread"] = tnx_level - fvx_level
+                # 30d change in spread
+                if len(fvx_hist) >= 25 and len(tnx_hist_full) >= 25:
+                    fvx_30d = float(fvx_hist["Close"].tail(30).head(5).mean())
+                    tnx_30d = float(tnx_hist_full["Close"].tail(30).head(5).mean())
+                    spread_now = tnx_level - fvx_level
+                    spread_30d = tnx_30d - fvx_30d
+                    result["yield_curve_change"] = spread_now - spread_30d
+        else:
+            result["yield_curve_spread"] = 0.0
+
+        # HG=F (Copper Futures) — 景氣領先指標
         try:
-            xli = yf.Ticker("XLI")
-            hist = xli.history(period="250d")
+            copper = yf.Ticker("HG=F")
+            hist = copper.history(period="30d")
             if len(hist) >= 21:
                 last_close = float(hist["Close"].iloc[-1])
                 close_20d_ago = float(hist["Close"].iloc[-21])
-                result["xli_return_20d"] = (last_close - close_20d_ago) / close_20d_ago
-            else:
-                result["xli_return_20d"] = 0.0
-            if len(hist) >= 200:
-                sma200 = float(hist["Close"].tail(200).mean())
+                result["copper_return_20d"] = (last_close - close_20d_ago) / close_20d_ago
+            elif len(hist) >= 2:
                 last_close = float(hist["Close"].iloc[-1])
-                result["xli_vs_sma200"] = (last_close - sma200) / sma200
+                first_close = float(hist["Close"].iloc[0])
+                result["copper_return_20d"] = (last_close - first_close) / first_close
             else:
-                result["xli_vs_sma200"] = 0.0
-        except Exception:
-            result["xli_return_20d"] = 0.0
-            result["xli_vs_sma200"] = 0.0
+                result["copper_return_20d"] = 0.0
+        except Exception as e:
+            result["copper_return_20d"] = 0.0
+            logger.warning("yfinance HG=F (copper) fetch failed: %s", e)
 
         # XLI/SPY 比率趨勢 — 製造業相對強度
         try:
-            spy = yf.Ticker("SPY")
-            spy_hist = spy.history(period="35d")
-            xli_short = yf.Ticker("XLI").history(period="35d")
+            spy_hist = _fetch_yfinance_with_fallback("SPY", "35d")
+            xli_short = _fetch_yfinance_with_fallback("XLI", "35d")
             if len(spy_hist) >= 21 and len(xli_short) >= 21:
                 xli_now = float(xli_short["Close"].iloc[-1])
                 spy_now = float(spy_hist["Close"].iloc[-1])
@@ -311,17 +396,24 @@ def _fetch_macro_data() -> dict:
                 result["xli_spy_ratio_trend"] = (ratio_now - ratio_20d) / ratio_20d if ratio_20d > 0 else 0.0
             else:
                 result["xli_spy_ratio_trend"] = 0.0
-        except Exception:
+        except Exception as e:
             result["xli_spy_ratio_trend"] = 0.0
+            logger.warning("yfinance XLI/SPY ratio fetch failed: %s", e)
 
-    except Exception:
+    except Exception as e:
         result.setdefault("vix", 20.0)
         result.setdefault("usdtwd_trend", 0.0)
         result.setdefault("tnx_change", 0.0)
         result.setdefault("xli_return_20d", 0.0)
         result.setdefault("xli_vs_sma200", 0.0)
         result.setdefault("xli_spy_ratio_trend", 0.0)
+        result.setdefault("yield_curve_spread", 0.0)
+        result.setdefault("copper_return_20d", 0.0)
+        logger.warning("yfinance macro import/init failed: %s", e)
 
+    logger.info("Macro data: VIX=%.1f USDTWD_trend=%.4f TNX_chg=%.4f XLI_20d=%.4f",
+                result.get("vix", 20), result.get("usdtwd_trend", 0),
+                result.get("tnx_change", 0), result.get("xli_return_20d", 0))
     _macro_cache["date"] = today
     _macro_cache["data"] = result
     return result
@@ -333,11 +425,12 @@ async def _fetch_revenue_batch(stock_ids: list[str]) -> dict[str, pd.DataFrame]:
     try:
         fetcher = StockFetcher()
         start = (date.today() - timedelta(days=450)).strftime("%Y-%m-%d")
+        end = date.today().strftime("%Y-%m-%d")
         for sid in stock_ids:
             try:
-                data = fetcher._query_finmind("TaiwanStockMonthRevenue", sid, start)
-                if data:
-                    result[sid] = pd.DataFrame(data)
+                data = fetcher._query_finmind("TaiwanStockMonthRevenue", sid, start, end)
+                if not data.empty:
+                    result[sid] = data
             except Exception:
                 pass
     except Exception:
@@ -952,19 +1045,35 @@ def _compute_news_sentiment(sentiment_scores: dict, sentiment_df: pd.DataFrame |
         return FactorResult("news_sentiment", 0.5, False, 0.0)
 
     components = {}
+    weight_total = 0.0
 
     # 1. Source-weighted score 40%
     if sentiment_df is not None and not sentiment_df.empty:
-        source_weights = {"cnyes": 0.35, "yahoo": 0.25, "ptt": 0.25, "google": 0.15}
+        # Source credibility weights — 基於來源品質的動態權重
+        source_weights = {
+            "cnyes": 0.40,        # 鉅亨網：專業財經媒體，可信度最高
+            "yahoo": 0.25, "yahoo_tw": 0.25,  # Yahoo 股市：綜合來源
+            "google": 0.20, "google_news": 0.20,  # Google News：聚合來源
+            "ptt": 0.15,          # PTT：社群輿情，噪音較高但有獨特訊號
+        }
         weighted_sum = 0.0
         weight_total = 0.0
-        for source, w in source_weights.items():
-            src_df = sentiment_df[sentiment_df["source"] == source] if "source" in sentiment_df.columns else pd.DataFrame()
-            if not src_df.empty:
+        seen_groups = set()  # Avoid double-counting yahoo/yahoo_tw
+        if "source" in sentiment_df.columns:
+            for source in sentiment_df["source"].unique():
+                w = source_weights.get(source, 0.10)
+                group = source.split("_")[0]  # yahoo_tw -> yahoo
+                if group in seen_groups:
+                    continue
+                seen_groups.add(group)
+                src_df = sentiment_df[sentiment_df["source"] == source]
                 src_scores = src_df["sentiment_score"].dropna()
                 if not src_scores.empty:
                     avg = float(src_scores.mean())
-                    weighted_sum += (avg + 1) / 2 * w
+                    # Normalize: if scores are in -1~1 range, map to 0~1
+                    if avg < 0 or (avg == 0 and src_scores.min() < 0):
+                        avg = (avg + 1) / 2
+                    weighted_sum += avg * w
                     weight_total += w
         source_score = weighted_sum / weight_total if weight_total > 0 else sentiment_scores[stock_id]
     else:
@@ -973,28 +1082,44 @@ def _compute_news_sentiment(sentiment_scores: dict, sentiment_df: pd.DataFrame |
 
     # 2. Sentiment momentum 30%
     momentum_score = 0.5
-    if sentiment_df is not None and not sentiment_df.empty and len(sentiment_df) >= 10:
+    if sentiment_df is not None and not sentiment_df.empty:
         scores = sentiment_df["sentiment_score"].dropna()
-        if len(scores) >= 10:
-            recent_5 = float(scores.tail(5).mean())
-            early_5 = float(scores.head(5).mean())
-            delta = recent_5 - early_5
+        if len(scores) >= 6:
+            half = len(scores) // 2
+            recent = float(scores.tail(half).mean())
+            early = float(scores.head(half).mean())
+            delta = recent - early
             momentum_score = max(0.0, min(1.0, 0.5 + delta * 1.5))
+        elif len(scores) >= 3:
+            # Few articles: use overall sentiment direction
+            avg = float(scores.mean())
+            if avg < 0:
+                avg = (avg + 1) / 2
+            momentum_score = max(0.0, min(1.0, avg))
     components["momentum"] = round(momentum_score, 4)
 
     # 3. Engagement anomaly 30%
     engage_score = 0.5
     if sentiment_df is not None and not sentiment_df.empty and "engagement" in sentiment_df.columns:
         engagement = sentiment_df["engagement"].dropna()
-        if len(engagement) >= 5:
-            recent_engage = float(engagement.tail(5).mean())
-            avg_engage = float(engagement.mean())
-            if avg_engage > 0:
-                ratio = recent_engage / avg_engage
-                if ratio > 2.0:
+        if len(engagement) >= 3:
+            total_engage = float(engagement.sum())
+            if total_engage > 0:
+                # High engagement amplifies sentiment direction
+                avg_per_article = total_engage / len(engagement)
+                if avg_per_article > 20:
                     engage_score = 0.7 if source_score > 0.5 else 0.3
-                elif ratio > 1.3:
+                elif avg_per_article > 5:
                     engage_score = 0.6 if source_score > 0.5 else 0.4
+            elif len(engagement) >= 5:
+                recent_engage = float(engagement.tail(3).mean())
+                avg_engage = float(engagement.mean())
+                if avg_engage > 0:
+                    ratio = recent_engage / avg_engage
+                    if ratio > 2.0:
+                        engage_score = 0.7 if source_score > 0.5 else 0.3
+                    elif ratio > 1.3:
+                        engage_score = 0.6 if source_score > 0.5 else 0.4
     components["engagement"] = round(engage_score, 4)
 
     freshness = 0.5
@@ -1007,33 +1132,47 @@ def _compute_news_sentiment(sentiment_scores: dict, sentiment_df: pd.DataFrame |
             freshness = 0.5
 
     total = source_score * 0.40 + momentum_score * 0.30 + engage_score * 0.30
-    return FactorResult("news_sentiment", round(total, 4), True, round(freshness, 2),
+    # available reflects actual data quality, not just presence of stock_id in scores
+    has_real_data = weight_total > 0 or (
+        sentiment_df is not None and not sentiment_df.empty and len(sentiment_df) >= 3
+    )
+    return FactorResult("news_sentiment", round(total, 4), has_real_data, round(freshness, 2),
                         components, raw_value=total)
 
 
 def _compute_global_context(global_data: dict | None) -> FactorResult:
-    """國際市場連動 (3%) — SOX + TSM"""
+    """國際市場連動 (3%) — SOX + TSM + ASML + EWT相對強弱"""
     if global_data is None:
         return FactorResult("global_context", 0.5, False, 0.0)
 
     components = {}
     sox_ret = global_data.get("sox_return", 0)
     tsm_ret = global_data.get("tsm_return", 0)
+    asml_ret = global_data.get("asml_return", 0)
+    ewt_1d = global_data.get("ewt_return_1d", 0)
 
     def ret_to_score(r):
         return max(0.05, min(0.95, 0.5 + r * 17.5))
 
     sox_score = ret_to_score(sox_ret)
     tsm_score = ret_to_score(tsm_ret)
+    asml_score = ret_to_score(asml_ret)
+
+    # EWT vs SOX 相對強弱
+    ewt_relative = ewt_1d - sox_ret
+    ewt_rel_score = max(0.05, min(0.95, 0.5 + ewt_relative * 10.0))
 
     components["sox_return"] = round(sox_ret, 4)
     components["tsm_return"] = round(tsm_ret, 4)
+    components["asml_return"] = round(asml_ret, 4)
     components["sox_score"] = round(sox_score, 4)
     components["tsm_score"] = round(tsm_score, 4)
+    components["asml_score"] = round(asml_score, 4)
+    components["ewt_relative_score"] = round(ewt_rel_score, 4)
 
-    total = sox_score * 0.60 + tsm_score * 0.40
+    total = sox_score * 0.40 + tsm_score * 0.25 + asml_score * 0.20 + ewt_rel_score * 0.15
 
-    available = sox_ret != 0 or tsm_ret != 0
+    available = sox_ret != 0 or tsm_ret != 0 or asml_ret != 0
     return FactorResult("global_context", round(total, 4), available, 0.9,
                         components, raw_value=total)
 
@@ -1048,19 +1187,62 @@ def _compute_ml_ensemble(ml_scores: dict, stock_id: str) -> FactorResult:
                         {"raw_ml_score": round(score, 4)}, raw_value=score)
 
 
-def _compute_fundamental_value(stock_id: str) -> FactorResult:
-    """基本面價值 (7%) — P/E + ROE + 殖利率"""
+def _compute_fundamental_value(stock_id: str, fundamental_data: dict | None = None,
+                                per_pbr_df: pd.DataFrame | None = None) -> FactorResult:
+    """基本面價值 (6%) — P/E + P/B + ROE + 殖利率
+
+    Data priority:
+        1. FinMind TaiwanStockPER (per_pbr_df) — 每日 P/E, P/B, 殖利率
+        2. yfinance ticker.info fallback — trailingPE, returnOnEquity, dividendYield
+    """
     components = {}
+    pe = None
+    pb = None
+    roe = None
+    div_yield = None
+    data_source = "none"
 
-    try:
-        import yfinance as yf
-        ticker = yf.Ticker(f"{stock_id}.TW")
-        info = ticker.info or {}
-    except Exception:
-        return FactorResult("fundamental_value", 0.5, False, 0.0)
+    # ── Primary: FinMind 每日 P/E, P/B, 殖利率 ──
+    if per_pbr_df is not None and not per_pbr_df.empty:
+        latest = per_pbr_df.iloc[-1]
+        if "PER" in per_pbr_df.columns:
+            val = latest["PER"]
+            if pd.notna(val) and val != 0:
+                pe = float(val)
+        if "PBR" in per_pbr_df.columns:
+            val = latest["PBR"]
+            if pd.notna(val) and val != 0:
+                pb = float(val)
+        if "dividend_yield" in per_pbr_df.columns:
+            val = latest["dividend_yield"]
+            if pd.notna(val):
+                div_yield = float(val) / 100.0  # FinMind 殖利率為百分比
+        if pe is not None or pb is not None:
+            data_source = "finmind"
+            components["data_source"] = "finmind"
 
-    # 1. P/E 風險過濾 (40%)
-    pe = info.get("trailingPE")
+    # ── Fallback: yfinance ──
+    info = {}
+    if fundamental_data and "info" in fundamental_data:
+        info = fundamental_data["info"]
+    elif data_source == "none":
+        try:
+            import yfinance as yf
+            ticker = yf.Ticker(f"{stock_id}.TW")
+            info = ticker.info or {}
+        except Exception as e:
+            logger.warning("yfinance %s.TW info fetch failed (fundamental_value): %s", stock_id, e)
+
+    if pe is None and info.get("trailingPE") is not None:
+        pe = info["trailingPE"]
+        data_source = data_source if data_source != "none" else "yfinance"
+    if div_yield is None and info.get("dividendYield") is not None:
+        div_yield = info["dividendYield"]
+    roe = info.get("returnOnEquity")
+    if "data_source" not in components and data_source != "none":
+        components["data_source"] = data_source
+
+    # 1. P/E 風險過濾 (30%)
     if pe is not None:
         components["pe_ratio"] = round(pe, 2)
         if pe > 80:
@@ -1076,8 +1258,23 @@ def _compute_fundamental_value(stock_id: str) -> FactorResult:
     else:
         pe_score = 0.50
 
-    # 2. ROE 穩健度 (35%)
-    roe = info.get("returnOnEquity")
+    # 2. P/B mean-reversion (20%)
+    if pb is not None:
+        components["pb_ratio"] = round(pb, 2)
+        if pb < 1.0:
+            pb_score = 0.75
+        elif pb < 1.5:
+            pb_score = 0.60
+        elif pb < 2.5:
+            pb_score = 0.50
+        elif pb < 3.0:
+            pb_score = 0.40
+        else:
+            pb_score = 0.25
+    else:
+        pb_score = 0.50
+
+    # 3. ROE 穩健度 (25%)
     if roe is not None:
         components["roe"] = round(roe, 4)
         if roe > 0.25:
@@ -1093,8 +1290,7 @@ def _compute_fundamental_value(stock_id: str) -> FactorResult:
     else:
         roe_score = 0.50
 
-    # 3. 殖利率 (25%)
-    div_yield = info.get("dividendYield")
+    # 4. 殖利率 (25%)
     if div_yield is not None:
         components["dividend_yield"] = round(div_yield, 4)
         if div_yield > 0.06:
@@ -1110,11 +1306,12 @@ def _compute_fundamental_value(stock_id: str) -> FactorResult:
     else:
         div_score = 0.50
 
-    total = pe_score * 0.40 + roe_score * 0.35 + div_score * 0.25
+    total = pe_score * 0.30 + pb_score * 0.20 + roe_score * 0.25 + div_score * 0.25
 
-    available = bool(pe is not None or roe is not None or div_yield is not None)
+    available = bool(pe is not None or pb is not None or roe is not None or div_yield is not None)
+    freshness = 0.9 if data_source == "finmind" else (0.7 if available else 0.0)
     return FactorResult("fundamental_value", round(total, 4), available,
-                        0.7 if available else 0.0, components, raw_value=total)
+                        freshness, components, raw_value=total)
 
 
 def _compute_liquidity_quality(df: pd.DataFrame) -> FactorResult:
@@ -1172,13 +1369,13 @@ def _compute_liquidity_quality(df: pd.DataFrame) -> FactorResult:
 
 
 def _compute_macro_risk(macro_data: dict | None) -> FactorResult:
-    """宏觀風險環境 (4%) — VIX + USD/TWD + 美10Y"""
+    """宏觀風險環境 (4%) — VIX + 殖利率曲線 + USD/TWD + 美10Y + 銅價"""
     if macro_data is None:
         return FactorResult("macro_risk", 0.5, False, 0.0)
 
     components = {}
 
-    # 1. VIX 恐慌指標 (40%)
+    # 1. VIX 恐慌指標 (30%)
     vix = macro_data.get("vix", 20)
     if vix < 15:
         vix_score = 0.80
@@ -1193,103 +1390,140 @@ def _compute_macro_risk(macro_data: dict | None) -> FactorResult:
     components["vix"] = round(vix, 2)
     components["vix_score"] = round(vix_score, 4)
 
-    # 2. USD/TWD 趨勢 (30%)
+    # 2. 殖利率曲線 (20%) — 10Y-5Y spread 變化 (inversion = bearish)
+    yield_spread = macro_data.get("yield_curve_spread", 0)
+    yield_change = macro_data.get("yield_curve_change", 0)
+    if yield_spread < -0.3:
+        yc_score = 0.20  # Deep inversion
+    elif yield_spread < 0:
+        yc_score = 0.35  # Mild inversion
+    elif yield_spread < 0.5:
+        yc_score = 0.55  # Normal flat
+    else:
+        yc_score = 0.70  # Normal steep
+    # Adjust for direction of change
+    yc_score = max(0.1, min(0.9, yc_score + yield_change * 2.0))
+    components["yield_curve_spread"] = round(yield_spread, 4)
+    components["yield_curve_score"] = round(yc_score, 4)
+
+    # 3. USD/TWD 趨勢 (20%)
     fx_trend = macro_data.get("usdtwd_trend", 0)
     fx_score = max(0.1, min(0.9, 0.5 - fx_trend * 15.0))
     components["usdtwd_trend"] = round(fx_trend, 4)
     components["fx_score"] = round(fx_score, 4)
 
-    # 3. 美國10Y殖利率變化 (30%)
+    # 4. 美國10Y殖利率變化 (15%)
     tnx_chg = macro_data.get("tnx_change", 0)
     tnx_score = max(0.1, min(0.9, 0.5 - tnx_chg * 1.5))
     components["tnx_change"] = round(tnx_chg, 4)
     components["tnx_score"] = round(tnx_score, 4)
 
-    total = vix_score * 0.40 + fx_score * 0.30 + tnx_score * 0.30
+    # 5. 銅價動能 (15%) — 景氣領先指標 (上漲 = risk-on)
+    copper_ret = macro_data.get("copper_return_20d", 0)
+    copper_score = max(0.1, min(0.9, 0.5 + copper_ret * 4.0))
+    components["copper_return_20d"] = round(copper_ret, 4)
+    components["copper_score"] = round(copper_score, 4)
+
+    total = vix_score * 0.30 + yc_score * 0.20 + fx_score * 0.20 + tnx_score * 0.15 + copper_score * 0.15
 
     available = vix != 20.0 or fx_trend != 0 or tnx_chg != 0
     return FactorResult("macro_risk", round(total, 4), available, 0.9,
                         components, raw_value=total)
 
 
-def _compute_margin_quality(stock_id: str) -> FactorResult:
-    """季報毛利率/營益率趨勢 (4%) — yfinance 季報數據"""
+def _compute_margin_quality(stock_id: str, fundamental_data: dict | None = None) -> FactorResult:
+    """季報毛利率/營益率趨勢 (4%) — yfinance 季報數據
+
+    Args:
+        stock_id: 股票代號
+        fundamental_data: 預取的 yfinance 數據 {"info": {...}, "quarterly_income_stmt": DataFrame}
+                          若為 None 則即時抓取 (backward compat)
+    """
     try:
-        import yfinance as yf
-        ticker = yf.Ticker(f"{stock_id}.TW")
+        # Resolve data source
+        if fundamental_data and "quarterly_income_stmt" in fundamental_data:
+            qis = fundamental_data["quarterly_income_stmt"]
+            info = fundamental_data.get("info", {})
+        else:
+            import yfinance as yf
+            ticker = yf.Ticker(f"{stock_id}.TW")
+            try:
+                qis = ticker.quarterly_income_stmt
+            except Exception:
+                qis = None
+            try:
+                info = ticker.info or {}
+            except Exception as e:
+                logger.warning("yfinance %s.TW info fetch failed (margin_quality): %s", stock_id, e)
+                info = {}
 
         # Try quarterly income statement first
-        try:
-            qis = ticker.quarterly_income_stmt
-            if qis is not None and not qis.empty and qis.shape[1] >= 2:
-                components = {}
+        if qis is not None and not qis.empty and qis.shape[1] >= 2:
+            components = {}
 
-                # Parse gross margin from quarterly data
-                gross_profit = None
-                total_revenue = None
-                operating_income = None
+            # Parse gross margin from quarterly data
+            gross_profit = None
+            total_revenue = None
+            operating_income = None
 
-                for label in ["Gross Profit", "GrossProfit"]:
-                    if label in qis.index:
-                        gross_profit = qis.loc[label]
-                        break
-                for label in ["Total Revenue", "TotalRevenue"]:
-                    if label in qis.index:
-                        total_revenue = qis.loc[label]
-                        break
-                for label in ["Operating Income", "OperatingIncome"]:
-                    if label in qis.index:
-                        operating_income = qis.loc[label]
-                        break
+            for label in ["Gross Profit", "GrossProfit"]:
+                if label in qis.index:
+                    gross_profit = qis.loc[label]
+                    break
+            for label in ["Total Revenue", "TotalRevenue"]:
+                if label in qis.index:
+                    total_revenue = qis.loc[label]
+                    break
+            for label in ["Operating Income", "OperatingIncome"]:
+                if label in qis.index:
+                    operating_income = qis.loc[label]
+                    break
 
-                if gross_profit is not None and total_revenue is not None:
-                    # Latest quarter gross margin
-                    gm_latest = float(gross_profit.iloc[0]) / float(total_revenue.iloc[0]) \
-                        if float(total_revenue.iloc[0]) != 0 else 0
-                    gm_prev = float(gross_profit.iloc[1]) / float(total_revenue.iloc[1]) \
-                        if float(total_revenue.iloc[1]) != 0 else 0
+            if gross_profit is not None and total_revenue is not None:
+                # Latest quarter gross margin
+                gm_latest = float(gross_profit.iloc[0]) / float(total_revenue.iloc[0]) \
+                    if float(total_revenue.iloc[0]) != 0 else 0
+                gm_prev = float(gross_profit.iloc[1]) / float(total_revenue.iloc[1]) \
+                    if float(total_revenue.iloc[1]) != 0 else 0
 
-                    gm_qoq_change = gm_latest - gm_prev
+                gm_qoq_change = gm_latest - gm_prev
 
-                    # YoY if 5+ quarters
-                    gm_yoy_change = 0.0
-                    if qis.shape[1] >= 5:
-                        gm_yoy = float(gross_profit.iloc[4]) / float(total_revenue.iloc[4]) \
-                            if float(total_revenue.iloc[4]) != 0 else 0
-                        gm_yoy_change = gm_latest - gm_yoy
+                # YoY if 5+ quarters
+                gm_yoy_change = 0.0
+                if qis.shape[1] >= 5:
+                    gm_yoy = float(gross_profit.iloc[4]) / float(total_revenue.iloc[4]) \
+                        if float(total_revenue.iloc[4]) != 0 else 0
+                    gm_yoy_change = gm_latest - gm_yoy
 
-                    # Scoring: 毛利率趨勢 (60%)
-                    trend_score = max(0.0, min(1.0, 0.5 + gm_qoq_change * 8.0 + gm_yoy_change * 4.0))
-                    components["gm_latest"] = round(gm_latest, 4)
-                    components["gm_qoq_change"] = round(gm_qoq_change, 4)
-                    components["gm_yoy_change"] = round(gm_yoy_change, 4)
-                    components["trend_score"] = round(trend_score, 4)
+                # Scoring: 毛利率趨勢 (60%)
+                trend_score = max(0.0, min(1.0, 0.5 + gm_qoq_change * 8.0 + gm_yoy_change * 4.0))
+                components["gm_latest"] = round(gm_latest, 4)
+                components["gm_qoq_change"] = round(gm_qoq_change, 4)
+                components["gm_yoy_change"] = round(gm_yoy_change, 4)
+                components["trend_score"] = round(trend_score, 4)
 
-                    # 營益率水準 (40%)
-                    op_margin = 0.0
-                    if operating_income is not None and float(total_revenue.iloc[0]) != 0:
-                        op_margin = float(operating_income.iloc[0]) / float(total_revenue.iloc[0])
-                    if op_margin > 0.20:
-                        level_score = 0.85
-                    elif op_margin > 0.10:
-                        level_score = 0.70
-                    elif op_margin > 0.05:
-                        level_score = 0.55
-                    elif op_margin > 0:
-                        level_score = 0.42
-                    else:
-                        level_score = 0.25
-                    components["op_margin"] = round(op_margin, 4)
-                    components["level_score"] = round(level_score, 4)
+                # 營益率水準 (40%)
+                op_margin = 0.0
+                if operating_income is not None and float(total_revenue.iloc[0]) != 0:
+                    op_margin = float(operating_income.iloc[0]) / float(total_revenue.iloc[0])
+                if op_margin > 0.20:
+                    level_score = 0.85
+                elif op_margin > 0.10:
+                    level_score = 0.70
+                elif op_margin > 0.05:
+                    level_score = 0.55
+                elif op_margin > 0:
+                    level_score = 0.42
+                else:
+                    level_score = 0.25
+                components["op_margin"] = round(op_margin, 4)
+                components["level_score"] = round(level_score, 4)
 
-                    total = trend_score * 0.60 + level_score * 0.40
-                    return FactorResult("margin_quality", round(total, 4), True, 0.6,
-                                        components, raw_value=total)
-        except Exception:
-            pass
+                total = trend_score * 0.60 + level_score * 0.40
+                return FactorResult("margin_quality", round(total, 4), True, 0.6,
+                                    components, raw_value=total)
 
-        # Fallback: ticker.info
-        info = ticker.info or {}
+        # Fallback: ticker.info margins
         gm = info.get("grossMargins")
         om = info.get("operatingMargins")
         if gm is not None or om is not None:
@@ -1315,8 +1549,8 @@ def _compute_margin_quality(stock_id: str) -> FactorResult:
             return FactorResult("margin_quality", round(total, 4), True, 0.4,
                                 components, raw_value=total)
 
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning("margin_quality computation failed for %s: %s", stock_id, e)
 
     return FactorResult("margin_quality", 0.5, False, 0.0)
 
@@ -1325,7 +1559,7 @@ def _compute_sector_aggregates(stock_dfs: dict[str, pd.DataFrame],
                                 trust_lookup: dict) -> dict[str, dict]:
     """預計算各產業聚合數據 (sector_rotation 因子用)
 
-    Returns: {sector_name: {net_flow, avg_return_20d, breadth}}
+    Returns: {sector_name: {net_flow, avg_return_20d, breadth, index_return}}
     """
     from collections import defaultdict
     sector_stocks = defaultdict(list)
@@ -1333,6 +1567,14 @@ def _compute_sector_aggregates(stock_dfs: dict[str, pd.DataFrame],
     for sid in stock_dfs:
         sector = STOCK_SECTOR.get(sid, DEFAULT_SECTOR)
         sector_stocks[sector].append(sid)
+
+    # Fetch TWSE industry indices (non-blocking, fail-safe)
+    industry_indices: dict[str, float] = {}
+    try:
+        scanner = TWSEScanner()
+        industry_indices = scanner.fetch_industry_indices()
+    except Exception as e:
+        logger.warning("TWSE industry indices fetch failed in sector_aggregates: %s", e)
 
     sector_data = {}
     all_flows = []
@@ -1369,6 +1611,7 @@ def _compute_sector_aggregates(stock_dfs: dict[str, pd.DataFrame],
             "avg_return_20d": avg_return,
             "breadth": breadth,
             "stock_count": total_count,
+            "index_return": industry_indices.get(sector),  # TWSE 產業指數報酬
         }
         all_flows.append(net_flow)
         all_returns.append(avg_return)
@@ -1376,16 +1619,18 @@ def _compute_sector_aggregates(stock_dfs: dict[str, pd.DataFrame],
     # Market average
     market_avg_flow = float(np.mean(all_flows)) if all_flows else 0.0
     market_avg_return = float(np.mean(all_returns)) if all_returns else 0.0
+    market_avg_index = float(np.mean([v for v in industry_indices.values() if v is not None])) if industry_indices else 0.0
     sector_data["_market_avg"] = {
         "net_flow": market_avg_flow,
         "avg_return_20d": market_avg_return,
+        "index_return": market_avg_index,
     }
 
     return sector_data
 
 
 def _compute_sector_rotation(stock_id: str, sector_data: dict | None) -> FactorResult:
-    """產業資金輪動 (3%) — 產業法人流向/動能/廣度 vs 市場平均"""
+    """產業資金輪動 (3%) — 法人流向 + TWSE產業指數動能 + 相對動能 + 廣度"""
     if sector_data is None or not sector_data:
         return FactorResult("sector_rotation", 0.5, False, 0.0)
 
@@ -1400,63 +1645,95 @@ def _compute_sector_rotation(stock_id: str, sector_data: dict | None) -> FactorR
     mkt_flow = market_avg.get("net_flow", 0)
     mkt_return = market_avg.get("avg_return_20d", 0)
 
-    # 1. 產業法人流向 vs 市場平均 (50%)
+    # 1. 產業法人流向 vs 市場平均 (35%)
     flow_diff = s_data["net_flow"] - mkt_flow
     flow_denom = max(abs(mkt_flow), 1000.0)
     flow_score = max(0.0, min(1.0, 0.5 + (flow_diff / flow_denom) * 0.3))
     components["flow_vs_market"] = round(flow_score, 4)
     components["sector"] = sector
 
-    # 2. 產業相對動能 vs 市場平均 (30%)
+    # 2. TWSE 產業指數動能 (30%) — 新增
+    index_return = s_data.get("index_return")
+    mkt_index_return = market_avg.get("index_return", 0)
+    has_index = index_return is not None
+    if has_index:
+        # 產業指數 vs 市場平均指數的相對強弱
+        idx_diff = index_return - mkt_index_return
+        index_score = max(0.0, min(1.0, 0.5 + idx_diff * 12.0))
+        components["index_return"] = round(index_return, 4)
+        components["index_momentum"] = round(index_score, 4)
+    else:
+        index_score = 0.5
+        components["index_momentum"] = 0.5
+
+    # 3. 產業相對動能 vs 市場平均 (20%)
     ret_diff = s_data["avg_return_20d"] - mkt_return
     ret_score = max(0.0, min(1.0, 0.5 + ret_diff * 5.0))
     components["return_vs_market"] = round(ret_score, 4)
 
-    # 3. 產業廣度 (20%)
+    # 4. 產業廣度 (15%)
     breadth = s_data["breadth"]
     breadth_score = max(0.0, min(1.0, breadth))
     components["breadth"] = round(breadth_score, 4)
 
-    total = flow_score * 0.50 + ret_score * 0.30 + breadth_score * 0.20
+    total = flow_score * 0.35 + index_score * 0.30 + ret_score * 0.20 + breadth_score * 0.15
     return FactorResult("sector_rotation", round(total, 4), True, 1.0,
                         components, raw_value=total)
 
 
 def _compute_export_momentum(global_data: dict | None) -> FactorResult:
-    """台灣出口動能 (4%) — EWT 20d/60d 報酬 + EWT vs SOX 相對強度"""
+    """台灣出口動能 (4%) — EWT/0050 20d/60d 報酬 + 相對強度"""
     if global_data is None:
         return FactorResult("export_momentum", 0.5, False, 0.0)
 
     ewt_1d = global_data.get("ewt_return_1d")
     ewt_20d = global_data.get("ewt_return_20d")
     ewt_60d = global_data.get("ewt_return_60d")
+    tw50_20d = global_data.get("tw50_return_20d")
+    tw50_60d = global_data.get("tw50_return_60d")
     sox_1d = global_data.get("sox_return", 0)
 
-    if ewt_20d is None:
+    # Use EWT primarily, fallback to 0050.TW
+    ret_20d = ewt_20d if (ewt_20d is not None and ewt_20d != 0) else tw50_20d
+    ret_60d = ewt_60d if (ewt_60d is not None and ewt_60d != 0) else tw50_60d
+
+    if ret_20d is None:
         return FactorResult("export_momentum", 0.5, False, 0.0)
 
     components = {}
 
-    # 1. EWT 20d 報酬 (50%)
-    s20 = max(0.0, min(1.0, 0.5 + ewt_20d * 4.0))
-    components["ewt_return_20d"] = round(ewt_20d, 4)
+    # 1. 20d 報酬 (40%)
+    s20 = max(0.0, min(1.0, 0.5 + ret_20d * 4.0))
+    components["return_20d"] = round(ret_20d, 4)
+    components["return_20d_score"] = round(s20, 4)
+    # Backward compat keys
+    components["ewt_return_20d"] = round(ewt_20d, 4) if ewt_20d is not None else 0.0
     components["ewt_20d_score"] = round(s20, 4)
 
-    # 2. EWT 60d 報酬 (30%)
+    # 2. 60d 報酬 (25%)
     s60 = 0.5
+    if ret_60d is not None:
+        s60 = max(0.0, min(1.0, 0.5 + ret_60d * 2.0))
+        components["return_60d"] = round(ret_60d, 4)
     if ewt_60d is not None:
-        s60 = max(0.0, min(1.0, 0.5 + ewt_60d * 2.0))
         components["ewt_return_60d"] = round(ewt_60d, 4)
     components["ewt_60d_score"] = round(s60, 4)
 
-    # 3. EWT vs SOX 相對強度 (20%)
+    # 3. 0050.TW 本地動能 (15%)
+    s_tw50 = 0.5
+    if tw50_20d is not None and tw50_20d != 0:
+        s_tw50 = max(0.0, min(1.0, 0.5 + tw50_20d * 4.0))
+        components["tw50_return_20d"] = round(tw50_20d, 4)
+    components["tw50_score"] = round(s_tw50, 4)
+
+    # 4. EWT vs SOX 相對強度 (20%)
     ewt_1d_val = ewt_1d if ewt_1d is not None else 0.0
     relative = ewt_1d_val - sox_1d
     s_rel = max(0.0, min(1.0, 0.5 + relative * 10.0))
     components["relative_strength"] = round(s_rel, 4)
 
-    total = s20 * 0.50 + s60 * 0.30 + s_rel * 0.20
-    available = ewt_20d != 0 or (ewt_60d is not None and ewt_60d != 0)
+    total = s20 * 0.40 + s60 * 0.25 + s_tw50 * 0.15 + s_rel * 0.20
+    available = ret_20d != 0 or (ret_60d is not None and ret_60d != 0)
     return FactorResult("export_momentum", round(total, 4), available, 0.9,
                         components, raw_value=total)
 
@@ -1695,6 +1972,8 @@ def score_stock(
     global_data: dict | None = None,
     macro_data: dict | None = None,
     sector_data: dict | None = None,
+    fundamental_data: dict | None = None,
+    per_pbr_df: pd.DataFrame | None = None,
 ) -> dict:
     """20 因子多維度評分
 
@@ -1724,10 +2003,10 @@ def score_stock(
         _compute_volatility_regime(df, df_tech),
         _compute_news_sentiment(sentiment_scores, sentiment_df, stock_id),
         _compute_global_context(global_data),
-        _compute_margin_quality(stock_id),
+        _compute_margin_quality(stock_id, fundamental_data),
         _compute_sector_rotation(stock_id, sector_data),
         _compute_ml_ensemble(ml_scores, stock_id),
-        _compute_fundamental_value(stock_id),
+        _compute_fundamental_value(stock_id, fundamental_data, per_pbr_df),
         _compute_liquidity_quality(df),
         _compute_macro_risk(macro_data),
         _compute_export_momentum(global_data),

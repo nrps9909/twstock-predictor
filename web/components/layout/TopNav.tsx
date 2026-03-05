@@ -38,7 +38,7 @@ export function TopNav() {
           </svg>
         </div>
         <span className="font-display text-sm tracking-wider" style={{ color: "var(--accent-gold)" }}>
-          AURUM
+          台股預測
         </span>
       </Link>
 
@@ -78,7 +78,7 @@ export function TopNav() {
           className="text-[8px] tracking-[0.2em] uppercase"
           style={{ color: "var(--text-muted)", fontFamily: "'Space Mono', monospace" }}
         >
-          v2.0
+          v3.0
         </span>
       </div>
     </header>

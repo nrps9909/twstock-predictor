@@ -11,6 +11,13 @@ import logging
 import warnings
 from contextlib import asynccontextmanager
 
+# ── Logging: 確保 INFO 層級的訊息印在 terminal ──────────
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(name)s %(levelname)s %(message)s",
+    datefmt="%H:%M:%S",
+)
+
 # Suppress ta library divide-by-zero warnings (harmless, clutters logs)
 warnings.filterwarnings("ignore", category=RuntimeWarning, module="ta")
 
@@ -112,8 +119,8 @@ async def _scheduled_ic_backfill():
 
 app = FastAPI(
     title="台股 AI 預測系統 API",
-    version="2.0.0",
-    description="台股走勢預測系統 REST API — 全市場掃描、技術分析、情緒分析、ML 預測、Multi-Agent 分析",
+    version="3.0.0",
+    description="台股走勢預測系統 REST API — 統一 6 階段管線、全市場掃描、20 因子評分、LLM 敘事生成",
     lifespan=lifespan,
 )
 

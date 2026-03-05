@@ -86,10 +86,10 @@ export function HeroInput({ onAnalyze, onAbort, isRunning, isCompact, currentSto
             className="font-display text-4xl md:text-5xl tracking-[0.15em] mb-3"
             style={{ color: "var(--accent-gold)" }}
           >
-            AURUM
+            台股 AI 預測
           </h1>
           <p className="text-sm" style={{ color: "var(--text-muted)" }}>
-            AI 驅動的台股深度分析
+            統一 6 階段管線 — 20 因子評分 + LLM 敘事
           </p>
         </div>
       )}

@@ -1,27 +1,24 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { PIPELINE_STEPS, type PipelineStep } from "@/lib/types";
+import { PIPELINE_PHASES } from "@/lib/constants";
+import type { AnalysisPhase } from "@/lib/types";
+import type { PhaseState } from "@/hooks/usePipeline";
 import { cn } from "@/lib/utils";
-import { Check, Loader2, X, SkipForward } from "lucide-react";
-
-interface StepState {
-  status: "pending" | "running" | "done" | "error" | "skipped";
-  message: string;
-}
+import { Check, Loader2, X } from "lucide-react";
 
 interface PipelineProgressProps {
-  steps: Record<PipelineStep, StepState>;
+  phases: Record<AnalysisPhase, PhaseState>;
   progress: number;
 }
 
-export function PipelineProgress({ steps, progress }: PipelineProgressProps) {
-  // Find the currently running step for the message display
-  const runningStep = PIPELINE_STEPS.find(({ key }) => steps[key].status === "running");
-  const runningMessage = runningStep ? steps[runningStep.key].message : "";
-  const runningKey = runningStep?.key ?? null;
+export function PipelineProgress({ phases, progress }: PipelineProgressProps) {
+  // Find the currently running phase for the message display
+  const runningPhase = PIPELINE_PHASES.find(({ key }) => phases[key].status === "running");
+  const runningMessage = runningPhase ? phases[runningPhase.key].message : "";
+  const runningKey = runningPhase?.key ?? null;
 
-  // Elapsed timer — resets when the running step changes
+  // Elapsed timer — resets when the running phase changes
   const [elapsed, setElapsed] = useState(0);
 
   useEffect(() => {
@@ -73,14 +70,13 @@ export function PipelineProgress({ steps, progress }: PipelineProgressProps) {
         </div>
       )}
 
-      {/* Steps */}
+      {/* Phases */}
       <div className="flex items-start justify-between">
-        {PIPELINE_STEPS.map(({ key, label }, i) => {
-          const step = steps[key];
-          const isDone = step.status === "done";
-          const isRunning = step.status === "running";
-          const isError = step.status === "error";
-          const isSkipped = step.status === "skipped";
+        {PIPELINE_PHASES.map(({ key, label }, i) => {
+          const phase = phases[key];
+          const isDone = phase.status === "done";
+          const isRunning = phase.status === "running";
+          const isError = phase.status === "error";
 
           return (
             <div key={key} className="flex items-start flex-1">
@@ -121,8 +117,7 @@ export function PipelineProgress({ steps, progress }: PipelineProgressProps) {
                   {isDone && <Check className="h-3.5 w-3.5" />}
                   {isRunning && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
                   {isError && <X className="h-3.5 w-3.5" />}
-                  {isSkipped && <SkipForward className="h-3 w-3" />}
-                  {step.status === "pending" && <span className="font-num">{i + 1}</span>}
+                  {phase.status === "pending" && <span className="font-num">{i + 1}</span>}
                 </div>
 
                 {/* Label */}
@@ -142,7 +137,7 @@ export function PipelineProgress({ steps, progress }: PipelineProgressProps) {
               </div>
 
               {/* Connector */}
-              {i < PIPELINE_STEPS.length - 1 && (
+              {i < PIPELINE_PHASES.length - 1 && (
                 <div
                   className="flex-1 min-w-[8px] mt-4"
                   style={{

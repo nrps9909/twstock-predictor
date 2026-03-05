@@ -191,6 +191,68 @@ class StockFetcher:
 
         return df
 
+    # ── FinMind 每日 P/E, P/B, 殖利率 ──────────────────
+
+    def fetch_per_pbr(
+        self, stock_id: str, start: str, end: str
+    ) -> pd.DataFrame:
+        """FinMind TaiwanStockPER — 每日 P/E, P/B, 殖利率
+
+        Returns:
+            DataFrame(date, PER, PBR, dividend_yield)
+        """
+        try:
+            df = self._query_finmind("TaiwanStockPER", stock_id, start, end)
+        except Exception as e:
+            logger.error("抓取 %s P/E P/B 失敗: %s", stock_id, e)
+            return pd.DataFrame()
+
+        if df.empty:
+            return df
+
+        df["date"] = pd.to_datetime(df["date"]).dt.date
+        rename_map = {}
+        if "PER" not in df.columns and "本益比" in df.columns:
+            rename_map["本益比"] = "PER"
+        if "PBR" not in df.columns and "股價淨值比" in df.columns:
+            rename_map["股價淨值比"] = "PBR"
+        if "dividend_yield" not in df.columns and "殖利率(%)" in df.columns:
+            rename_map["殖利率(%)"] = "dividend_yield"
+        elif "dividend_yield" not in df.columns and "殖利率" in df.columns:
+            rename_map["殖利率"] = "dividend_yield"
+        if rename_map:
+            df = df.rename(columns=rename_map)
+
+        cols = ["date"]
+        for c in ["PER", "PBR", "dividend_yield"]:
+            if c in df.columns:
+                df[c] = pd.to_numeric(df[c], errors="coerce")
+                cols.append(c)
+        return df[cols] if len(cols) > 1 else pd.DataFrame()
+
+    def fetch_dividend_history(
+        self, stock_id: str, start: str, end: str
+    ) -> pd.DataFrame:
+        """FinMind TaiwanStockDividendResult — 歷史除權息
+
+        Returns:
+            DataFrame with dividend result columns
+        """
+        try:
+            df = self._query_finmind(
+                "TaiwanStockDividendResult", stock_id, start, end
+            )
+        except Exception as e:
+            logger.error("抓取 %s 除權息失敗: %s", stock_id, e)
+            return pd.DataFrame()
+
+        if df.empty:
+            return df
+
+        if "date" in df.columns:
+            df["date"] = pd.to_datetime(df["date"]).dt.date
+        return df
+
     # ── 即時報價（twstock） ──────────────────────────────
 
     @staticmethod

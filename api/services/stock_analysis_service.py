@@ -63,6 +63,8 @@ class StockData:
     macro_data: dict | None              # VIX/FX/TNX/XLI
     sentiment_df: pd.DataFrame | None    # News/PTT sentiment records
     sentiment_scores: dict               # {stock_id: avg_score}
+    fundamental_data: dict | None = None # yfinance info + quarterly_income_stmt
+    per_pbr_df: pd.DataFrame | None = None  # FinMind 每日 P/E, P/B
     current_price: float = 0.0
     price_change_pct: float = 0.0
 
@@ -176,14 +178,20 @@ class StockAnalysisService:
         stock_name: str = "",
     ) -> AsyncGenerator[str, None]:
         """單一入口：對指定股票執行完整 6 階段分析，透過 SSE 串流回報進度。"""
-        stock_name = stock_name or STOCK_LIST.get(stock_id, stock_id)
+        import time as _time
+        stock_name = stock_name or STOCK_LIST.get(stock_id, stock_name)
+        t_total = _time.perf_counter()
+
+        logger.info("═══ 開始分析 %s %s ═══", stock_id, stock_name)
 
         # Phase 1: 數據收集
+        logger.info("[Phase 1/6] 數據收集 — 開始 (%s)", stock_id)
+        t0 = _time.perf_counter()
         yield _sse_event("data_collection", "running", 5, f"收集 {stock_id} {stock_name} 數據...")
         try:
             data = await self._collect_data(stock_id, stock_name)
         except Exception as e:
-            logger.error("Phase 1 failed for %s: %s", stock_id, e)
+            logger.error("[Phase 1/6] 數據收集 — 失敗: %s", e, exc_info=True)
             yield _sse_event("data_collection", "error", 5, f"數據收集失敗: {e}")
             yield _sse_event("complete", "error", 100, "分析失敗", {
                 "stock_id": stock_id, "error": str(e),
@@ -191,57 +199,110 @@ class StockAnalysisService:
             return
 
         if data.df.empty or len(data.df) < 20:
+            logger.warning("[Phase 1/6] 數據收集 — 資料不足 (rows=%d)", len(data.df))
             yield _sse_event("complete", "error", 100, "價格資料不足", {
                 "stock_id": stock_id, "error": "價格資料不足，無法分析",
             })
             return
 
+        logger.info(
+            "[Phase 1/6] 數據收集 — 完成 (%.1fs) | 價格=%d筆 技術=%d筆 現價=%.1f 漲跌=%.2f%% 法人=%s 營收=%s 情緒=%s",
+            _time.perf_counter() - t0,
+            len(data.df), len(data.df_tech),
+            data.current_price, data.price_change_pct,
+            "有" if data.trust_info else "無",
+            "有" if data.revenue_df is not None else "無",
+            "有" if data.sentiment_df is not None else "無",
+        )
         yield _sse_event("data_collection", "done", 15, "數據收集完成")
 
         # Phase 2: 特徵萃取
+        logger.info("[Phase 2/6] 特徵萃取 — 開始 (HMM + ML + LLM 情緒)")
+        t0 = _time.perf_counter()
         yield _sse_event("feature_extraction", "running", 20, "計算 20 因子 + HMM + ML...")
         regime, ml_scores = await self._extract_features(data)
+        logger.info(
+            "[Phase 2/6] 特徵萃取 — 完成 (%.1fs) | regime=%s ml_scores=%s",
+            _time.perf_counter() - t0, regime, ml_scores or "無模型",
+        )
         yield _sse_event("feature_extraction", "done", 40, "特徵萃取完成")
 
         # Phase 3: 多因子評分
+        logger.info("[Phase 3/6] 多因子評分 — 開始")
+        t0 = _time.perf_counter()
         yield _sse_event("scoring", "running", 45, "多因子加權評分...")
         score_result = self._score(data, regime, ml_scores)
+        avail_count = sum(1 for f in score_result.factors if f.available)
+        logger.info(
+            "[Phase 3/6] 多因子評分 — 完成 (%.1fs) | 總分=%.3f 訊號=%s 信心=%.2f 可用因子=%d/20 regime=%s",
+            _time.perf_counter() - t0,
+            score_result.total_score, score_result.signal, score_result.confidence,
+            avail_count, regime,
+        )
         yield _sse_event("scoring", "done", 55, f"評分完成: {score_result.total_score:.2f} ({score_result.signal})")
 
         # Phase 4: LLM 敘事生成
+        logger.info("[Phase 4/6] LLM 敘事生成 — 開始")
+        t0 = _time.perf_counter()
         yield _sse_event("narrative", "running", 60, "生成分析報告...")
         narrative = await self._generate_narrative(
             stock_id, stock_name, data, score_result, regime, ml_scores
+        )
+        logger.info(
+            "[Phase 4/6] LLM 敘事生成 — 完成 (%.1fs) | source=%s outlook=%s",
+            _time.perf_counter() - t0, narrative.source,
+            narrative.outlook[:40] + "..." if len(narrative.outlook) > 40 else narrative.outlook,
         )
         yield _sse_event("narrative", "done", 75,
                          f"敘事生成完成 (source={narrative.source})")
 
         # Phase 5: 風險控制
+        logger.info("[Phase 5/6] 風險控制 — 開始")
+        t0 = _time.perf_counter()
         yield _sse_event("risk_control", "running", 80, "風險檢查...")
         risk_decision = self._apply_risk_controls(
             stock_id, data, score_result, regime
+        )
+        logger.info(
+            "[Phase 5/6] 風險控制 — 完成 (%.1fs) | action=%s position=%.2f%% approved=%s stop=%.1f profit=%.1f notes=%s",
+            _time.perf_counter() - t0,
+            risk_decision.action, risk_decision.position_size * 100,
+            risk_decision.approved,
+            risk_decision.stop_loss or 0, risk_decision.take_profit or 0,
+            risk_decision.risk_notes or "無",
         )
         yield _sse_event("risk_control", "done", 88,
                          f"風控完成: {risk_decision.action} (approved={risk_decision.approved})")
 
         # Phase 6: 儲存 + 警報
+        logger.info("[Phase 6/6] 儲存結果 — 開始")
+        t0 = _time.perf_counter()
         yield _sse_event("finalize", "running", 90, "儲存結果...")
         result = self._build_result(
             data, score_result, narrative, risk_decision, regime
         )
         await self._save_and_alert(data, score_result, result)
+        logger.info("[Phase 6/6] 儲存結果 — 完成 (%.1fs)", _time.perf_counter() - t0)
         yield _sse_event("finalize", "done", 95, "儲存完成")
 
         # Complete
+        elapsed = _time.perf_counter() - t_total
+        logger.info(
+            "═══ 分析完成 %s %s ═══ 總耗時 %.1fs | 總分=%.3f 訊號=%s 信心=%.2f regime=%s action=%s approved=%s",
+            stock_id, stock_name, elapsed,
+            result.total_score, result.signal, result.confidence,
+            result.regime, risk_decision.action, risk_decision.approved,
+        )
         yield _sse_event("complete", "done", 100, "分析完成", asdict(result))
 
     # ─── Phase 1: Data Collection ────────────────────────
 
     async def _collect_data(self, stock_id: str, stock_name: str) -> StockData:
         """並行收集所有數據源"""
+        logger.info("  ├─ 並行抓取: 價格 / 法人 / 營收 / 全球 / 宏觀 / 情緒 / 基本面 / P/E ...")
 
         # Parallel fetches
-        (df, trust_info, revenue_df, global_data, macro_data, sentiment_result) = (
+        (df, trust_info, revenue_df, global_data, macro_data, sentiment_result, fundamental_data, per_pbr_df) = (
             await asyncio.gather(
                 self._fetch_price_data(stock_id),
                 self._fetch_trust_info(stock_id),
@@ -249,29 +310,64 @@ class StockAnalysisService:
                 asyncio.to_thread(_fetch_global_market_data),
                 asyncio.to_thread(_fetch_macro_data),
                 self._fetch_sentiment(stock_id),
+                self._fetch_fundamental(stock_id),
+                self._fetch_per_pbr(stock_id),
                 return_exceptions=True,
             )
         )
 
         # Handle exceptions from gather
+        fetch_status = []
         if isinstance(df, Exception):
-            logger.error("Price fetch failed: %s", df)
+            logger.error("  │  ✗ 價格抓取失敗: %s", df)
             df = pd.DataFrame()
+            fetch_status.append("價格:✗")
+        else:
+            fetch_status.append(f"價格:✓({len(df)}筆)")
         if isinstance(trust_info, Exception):
-            logger.warning("Trust info fetch failed: %s", trust_info)
+            logger.warning("  │  ✗ 法人資料失敗: %s", trust_info)
             trust_info = {}
+            fetch_status.append("法人:✗")
+        else:
+            fetch_status.append(f"法人:{'✓' if trust_info else '空'}")
         if isinstance(revenue_df, Exception):
-            logger.warning("Revenue fetch failed: %s", revenue_df)
+            logger.warning("  │  ✗ 營收資料失敗: %s", revenue_df)
             revenue_df = None
+            fetch_status.append("營收:✗")
+        else:
+            fetch_status.append(f"營收:{'✓' if revenue_df is not None else '空'}")
         if isinstance(global_data, Exception):
-            logger.warning("Global data fetch failed: %s", global_data)
+            logger.warning("  │  ✗ 全球市場失敗: %s", global_data)
             global_data = {}
+            fetch_status.append("全球:✗")
+        else:
+            fetch_status.append(f"全球:{'✓' if global_data else '空'}")
         if isinstance(macro_data, Exception):
-            logger.warning("Macro data fetch failed: %s", macro_data)
+            logger.warning("  │  ✗ 宏觀資料失敗: %s", macro_data)
             macro_data = {}
+            fetch_status.append("宏觀:✗")
+        else:
+            fetch_status.append(f"宏觀:{'✓' if macro_data else '空'}")
         if isinstance(sentiment_result, Exception):
-            logger.warning("Sentiment fetch failed: %s", sentiment_result)
+            logger.warning("  │  ✗ 情緒資料失敗: %s", sentiment_result)
             sentiment_result = (None, {})
+            fetch_status.append("情緒:✗")
+        else:
+            fetch_status.append("情緒:✓")
+        if isinstance(fundamental_data, Exception):
+            logger.warning("  │  ✗ 基本面資料失敗: %s", fundamental_data)
+            fundamental_data = None
+            fetch_status.append("基本面:✗")
+        else:
+            fetch_status.append(f"基本面:{'✓' if fundamental_data else '空'}")
+        if isinstance(per_pbr_df, Exception):
+            logger.warning("  │  ✗ P/E P/B 失敗: %s", per_pbr_df)
+            per_pbr_df = None
+            fetch_status.append("P/E:✗")
+        else:
+            fetch_status.append(f"P/E:{'✓' if per_pbr_df is not None and not per_pbr_df.empty else '空'}")
+
+        logger.info("  ├─ 抓取結果: %s", " | ".join(fetch_status))
 
         sentiment_df, sentiment_scores = sentiment_result
 
@@ -283,8 +379,13 @@ class StockAnalysisService:
                 analyzer = TechnicalAnalyzer()
                 df_tech = analyzer.compute_all(df)
                 signals = analyzer.get_signals(df_tech)
+                summary = signals.get("summary", {})
+                logger.info("  ├─ 技術分析完成: signal=%s score=%s/%s",
+                            summary.get("signal", "?"),
+                            summary.get("raw_score", "?"),
+                            summary.get("max_score", "?"))
             except Exception as e:
-                logger.warning("Technical analysis failed: %s", e)
+                logger.warning("  ├─ 技術分析失敗: %s", e)
 
         # Current price
         current_price = 0.0
@@ -308,6 +409,8 @@ class StockAnalysisService:
             macro_data=macro_data,
             sentiment_df=sentiment_df,
             sentiment_scores=sentiment_scores,
+            fundamental_data=fundamental_data,
+            per_pbr_df=per_pbr_df,
             current_price=current_price,
             price_change_pct=price_change_pct,
         )
@@ -353,12 +456,17 @@ class StockAnalysisService:
     async def _fetch_sentiment(
         self, stock_id: str
     ) -> tuple[pd.DataFrame | None, dict]:
-        """Fetch sentiment data from DB"""
+        """Fetch sentiment data from DB, live-crawl if DB has no recent data"""
         try:
             today = date.today()
             sent_df = await asyncio.to_thread(
                 get_sentiment, stock_id, today - timedelta(days=14), today
             )
+
+            # If DB has no recent sentiment, live-crawl from PTT/鉅亨/Google/Yahoo
+            if sent_df is None or sent_df.empty:
+                sent_df = await self._crawl_sentiment_live(stock_id)
+
             sentiment_scores = {}
             if sent_df is not None and not sent_df.empty:
                 scores = sent_df["sentiment_score"].dropna()
@@ -366,8 +474,133 @@ class StockAnalysisService:
                     avg = float(scores.mean())
                     sentiment_scores[stock_id] = (avg + 1) / 2  # Normalize to 0-1
             return sent_df, sentiment_scores
-        except Exception:
+        except Exception as e:
+            logger.warning("Sentiment fetch failed: %s", e)
             return None, {}
+
+    async def _crawl_sentiment_live(self, stock_id: str) -> pd.DataFrame | None:
+        """Live-crawl sentiment from PTT, 鉅亨, Google News, Yahoo TW"""
+        try:
+            from src.data.sentiment_crawler import SentimentCrawler
+            from src.db.database import insert_sentiment
+
+            crawler = SentimentCrawler()
+            articles = await asyncio.to_thread(crawler.crawl_all, stock_id)
+            if not articles:
+                logger.info("  │  情緒爬蟲: 0 篇文章 (stock=%s)", stock_id)
+                return None
+
+            logger.info("  │  情緒爬蟲: %d 篇文章 (stock=%s)", len(articles), stock_id)
+
+            # LLM batch-score titles that only have "neutral" label (from RSS/API sources)
+            neutral_titles = [
+                art.get("title", "") for art in articles
+                if art.get("sentiment_label") == "neutral" and art.get("title")
+            ]
+            llm_labels = {}
+            if neutral_titles:
+                llm_labels = await self._batch_score_titles(stock_id, neutral_titles)
+
+            # Assign sentiment_score from label
+            label_to_score = {"bullish": 0.8, "bearish": -0.8, "neutral": 0.0}
+            records = []
+            for art in articles:
+                title = art.get("title", "")
+                # Override neutral labels with LLM results
+                if art.get("sentiment_label") == "neutral" and title in llm_labels:
+                    art["sentiment_label"] = llm_labels[title]
+                art.setdefault("sentiment_label", "neutral")
+                art.setdefault("sentiment_score",
+                               label_to_score.get(art.get("sentiment_label", "neutral"), 0.0))
+                art.setdefault("engagement", 0)
+                records.append(art)
+
+            # Persist to DB for future queries
+            try:
+                await asyncio.to_thread(insert_sentiment, records)
+            except Exception as e:
+                logger.warning("  │  情緒寫入 DB 失敗: %s", e)
+
+            return pd.DataFrame(records)
+        except Exception as e:
+            logger.warning("  │  情緒爬蟲失敗: %s", e)
+            return None
+
+    async def _batch_score_titles(
+        self, stock_id: str, titles: list[str]
+    ) -> dict[str, str]:
+        """Use LLM to batch-classify news titles as bullish/bearish/neutral"""
+        try:
+            from src.utils.llm_client import call_claude, parse_json_response
+            from src.utils.constants import STOCK_LIST
+
+            stock_name = STOCK_LIST.get(stock_id, stock_id)
+            numbered = "\n".join(f"{i+1}. {t}" for i, t in enumerate(titles[:30]))
+            prompt = f"""對以下與 {stock_id} ({stock_name}) 相關的新聞標題進行情緒分類。
+
+{numbered}
+
+回傳 JSON array，每個元素對應一則標題：
+[{{"idx": 1, "sentiment": "bullish"}}, {{"idx": 2, "sentiment": "bearish"}}, ...]
+
+sentiment 只能是: bullish / bearish / neutral
+規則：利多消息(營收成長/獲利/漲價/需求增加)=bullish，利空消息(裁員/虧損/下修/賣超)=bearish，中性或無法判斷=neutral
+只回傳 JSON。"""
+
+            text = await call_claude(prompt, model="claude-haiku-4-5-20251001", timeout=60)
+            results = parse_json_response(text)
+            if isinstance(results, list):
+                mapping = {}
+                for item in results:
+                    idx = item.get("idx", 0) - 1
+                    if 0 <= idx < len(titles):
+                        mapping[titles[idx]] = item.get("sentiment", "neutral")
+                logger.info("  │  LLM 標題情緒分類: %d/%d 完成", len(mapping), len(titles))
+                return mapping
+        except Exception as e:
+            logger.warning("  │  LLM 標題分類失敗: %s", e)
+        return {}
+
+    async def _fetch_fundamental(self, stock_id: str) -> dict | None:
+        """Fetch yfinance fundamental data (info + quarterly_income_stmt) for Phase 1 prefetch"""
+        def _do_fetch():
+            try:
+                import yfinance as yf
+                ticker = yf.Ticker(f"{stock_id}.TW")
+                result = {}
+                try:
+                    info = ticker.info
+                    if info:
+                        result["info"] = info
+                except Exception as e:
+                    logger.warning("yfinance %s.TW info fetch failed: %s", stock_id, e)
+                try:
+                    qis = ticker.quarterly_income_stmt
+                    if qis is not None and not qis.empty:
+                        result["quarterly_income_stmt"] = qis
+                except Exception as e:
+                    logger.warning("yfinance %s.TW quarterly_income_stmt fetch failed: %s", stock_id, e)
+                return result if result else None
+            except Exception as e:
+                logger.warning("yfinance %s.TW fundamental fetch failed: %s", stock_id, e)
+                return None
+
+        return await asyncio.to_thread(_do_fetch)
+
+    async def _fetch_per_pbr(self, stock_id: str) -> pd.DataFrame | None:
+        """Fetch FinMind daily P/E, P/B, dividend_yield"""
+        try:
+            fetcher = StockFetcher()
+            end_date = date.today()
+            start_date = end_date - timedelta(days=90)
+            df = await asyncio.to_thread(
+                fetcher.fetch_per_pbr, stock_id,
+                start_date.isoformat(), end_date.isoformat()
+            )
+            return df if df is not None and not df.empty else None
+        except Exception as e:
+            logger.warning("FinMind P/E P/B fetch failed for %s: %s", stock_id, e)
+            return None
 
     # ─── Phase 2: Feature Extraction ─────────────────────
 
@@ -509,6 +742,8 @@ class StockAnalysisService:
             global_data=data.global_data,
             macro_data=data.macro_data,
             sector_data=sector_data,
+            fundamental_data=data.fundamental_data,
+            per_pbr_df=data.per_pbr_df,
         )
 
         # Extract factors for later use
@@ -762,11 +997,13 @@ class StockAnalysisService:
         result: AnalysisResult,
     ):
         """Save to DB + generate alerts + record factor IC"""
+        logger.info("  ├─ 儲存: MarketScanResult + PipelineResult + FactorIC + Alerts")
 
         # 1. Save as MarketScanResult (reuse existing DB schema)
         scan_record = {
             "stock_id": data.stock_id,
             "stock_name": data.stock_name,
+            "scan_date": date.today(),
             "current_price": data.current_price,
             "price_change_pct": data.price_change_pct,
             "total_score": result.total_score,
@@ -808,8 +1045,9 @@ class StockAnalysisService:
 
         try:
             await asyncio.to_thread(save_market_scan, [scan_record])
+            logger.info("  │  ✓ MarketScanResult 已儲存")
         except Exception as e:
-            logger.error("Failed to save scan result: %s", e)
+            logger.error("  │  ✗ MarketScanResult 儲存失敗: %s", e)
 
         # 2. Save as PipelineResult (for backward compat with existing pipeline queries)
         pipeline_record = {
@@ -838,8 +1076,9 @@ class StockAnalysisService:
 
         try:
             await asyncio.to_thread(save_pipeline_result_record, pipeline_record)
+            logger.info("  │  ✓ PipelineResult 已儲存")
         except Exception as e:
-            logger.error("Failed to save pipeline result: %s", e)
+            logger.error("  │  ✗ PipelineResult 儲存失敗: %s", e)
 
         # 3. Factor IC records
         try:
@@ -854,12 +1093,16 @@ class StockAnalysisService:
                     })
             if ic_records:
                 await asyncio.to_thread(save_factor_ic_records, ic_records)
+                logger.info("  │  ✓ FactorIC 已儲存 (%d 筆)", len(ic_records))
+            else:
+                logger.info("  │  - FactorIC 無可儲存記錄")
         except Exception as e:
-            logger.error("Failed to save factor IC records: %s", e)
+            logger.error("  │  ✗ FactorIC 儲存失敗: %s", e)
 
         # 4. Alert generation
         try:
             generate_alerts_from_scan([scan_record])
+            logger.info("  │  ✓ 警報檢查完成")
         except Exception as e:
             logger.error("Failed to generate alerts: %s", e)
 

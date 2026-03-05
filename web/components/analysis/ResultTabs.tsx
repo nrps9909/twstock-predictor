@@ -2,30 +2,27 @@
 
 import { useState } from "react";
 import { cn } from "@/lib/utils";
-import type { PipelineResult, TechnicalResult, AgentSubEvent } from "@/lib/types";
+import type { AnalysisResult, TechnicalResult } from "@/lib/types";
 import { OverviewTab } from "./OverviewTab";
 import { TechnicalTab } from "./TechnicalTab";
-import { PredictionTab } from "./PredictionTab";
-import { AgentTab } from "./AgentTab";
+import { FactorTab } from "./FactorTab";
 import { SentimentTab } from "./SentimentTab";
 
 const TABS = [
   { key: "overview", label: "總覽" },
   { key: "technical", label: "技術分析" },
-  { key: "ml", label: "ML 預測" },
-  { key: "agent", label: "Agent 辯論" },
+  { key: "factors", label: "因子分析" },
   { key: "sentiment", label: "情緒" },
 ] as const;
 
 type TabKey = (typeof TABS)[number]["key"];
 
 interface ResultTabsProps {
-  result: PipelineResult;
+  result: AnalysisResult;
   technicalData: TechnicalResult | null;
-  agentSubEvents: AgentSubEvent[];
 }
 
-export function ResultTabs({ result, technicalData, agentSubEvents }: ResultTabsProps) {
+export function ResultTabs({ result, technicalData }: ResultTabsProps) {
   const [activeTab, setActiveTab] = useState<TabKey>("overview");
 
   return (
@@ -64,9 +61,8 @@ export function ResultTabs({ result, technicalData, agentSubEvents }: ResultTabs
       {/* Tab content */}
       <div className="min-h-[400px]">
         {activeTab === "overview" && <OverviewTab result={result} />}
-        {activeTab === "technical" && <TechnicalTab result={result} technicalData={technicalData} />}
-        {activeTab === "ml" && <PredictionTab result={result} />}
-        {activeTab === "agent" && <AgentTab result={result} agentSubEvents={agentSubEvents} />}
+        {activeTab === "technical" && <TechnicalTab technicalData={technicalData} />}
+        {activeTab === "factors" && <FactorTab result={result} />}
         {activeTab === "sentiment" && <SentimentTab result={result} />}
       </div>
     </div>

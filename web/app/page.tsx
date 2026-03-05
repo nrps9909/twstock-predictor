@@ -10,7 +10,6 @@ import { HeroInput } from "@/components/analysis/HeroInput";
 import { SummaryStrip } from "@/components/analysis/SummaryStrip";
 import { ResultTabs } from "@/components/analysis/ResultTabs";
 import { PipelineProgress } from "@/components/dashboard/PipelineProgress";
-import { AgentActivityFeed } from "@/components/dashboard/AgentActivityFeed";
 import { AlertTriangle, RotateCcw } from "lucide-react";
 
 export default function AnalysisPage() {
@@ -28,10 +27,9 @@ function AnalysisPageInner() {
   const {
     state,
     progress,
-    steps,
+    phases,
     result,
     error,
-    agentSubEvents,
     run,
     abort,
     reset,
@@ -69,10 +67,6 @@ function AnalysisPageInner() {
   const isError = state === "error";
   const currentStockId = result?.stock_id || null;
 
-  // Check if agent step is active (show activity feed)
-  const agentStepActive =
-    steps.agent.status === "running" || steps.agent.status === "done";
-
   return (
     <div className="flex flex-col h-[calc(100vh-56px)]">
       <div className="flex-1 overflow-auto">
@@ -89,10 +83,7 @@ function AnalysisPageInner() {
           {/* Pipeline Progress (visible during analysis) */}
           {isRunning && (
             <div className="space-y-4 card-reveal">
-              <PipelineProgress steps={steps} progress={progress} />
-              {agentStepActive && agentSubEvents.length > 0 && (
-                <AgentActivityFeed events={agentSubEvents} />
-              )}
+              <PipelineProgress phases={phases} progress={progress} />
             </div>
           )}
 
@@ -134,7 +125,6 @@ function AnalysisPageInner() {
               <ResultTabs
                 result={result}
                 technicalData={technicalData}
-                agentSubEvents={agentSubEvents}
               />
             </div>
           )}

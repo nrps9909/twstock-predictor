@@ -2,7 +2,7 @@
 
 import type {
   StockInfo, StockStatus, TechnicalResult, SentimentSummary,
-  PipelineEvent, PredictionRecord,
+  PipelineEvent, PredictionRecord, AnalysisResult,
   MarketOverview, MarketIntel, MarketScanEvent, Alert,
   DeepPipelineResult, FactorICData,
 } from "./types";
@@ -124,21 +124,15 @@ export const api = {
     return controller;
   },
 
-  // SSE Pipeline
+  // SSE Pipeline (unified 6-phase)
   runPipeline: (
     id: string,
     onEvent: (event: PipelineEvent) => void,
-    opts?: { forceRetrain?: boolean; epochs?: number },
   ): AbortController => {
     const controller = new AbortController();
 
-    fetch(`${SSE_BASE}/api/stocks/${id}/pipeline`, {
+    fetch(`${SSE_BASE}/api/market/analyze/${id}`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        force_retrain: opts?.forceRetrain ?? false,
-        epochs: opts?.epochs ?? 50,
-      }),
       signal: controller.signal,
     }).then(async (res) => {
       if (!res.ok || !res.body) return;
