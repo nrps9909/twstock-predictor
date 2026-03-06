@@ -13,8 +13,6 @@
 4. LLM 敘事生成
 5. 風險控制 + 部位建議
 6. 儲存 + 警報
-
-保留 RuleEngine 和 AgentOrchestrator 向後相容接口。
 """
 
 import asyncio
@@ -26,92 +24,10 @@ import numpy as np
 from src.agents.base import (
     AgentMessage, AgentRole, MarketContext, Signal, TradeDecision,
 )
-from src.agents.risk_agent import RiskAgent, RiskLimits
-from src.agents.memory import AgentMemorySystem
+from src.agents.memory import ShortTermMemory
 from src.risk.manager import RiskManager
 
 logger = logging.getLogger(__name__)
-
-
-class RuleEngine:
-    """規則引擎 — ML 信號為主，Agent 觀點為輔
-
-    核心原則：
-    - ML 有效預測時: ML 60% + Agent 40%
-    - ML 不可用時: Agent 100%
-    - 硬性風控規則無法被任何來源覆蓋
-    """
-
-    # 信號映射
-    SIGNAL_SCORE = {
-        "strong_buy": 1.0,
-        "buy": 0.5,
-        "hold": 0.0,
-        "sell": -0.5,
-        "strong_sell": -1.0,
-    }
-
-    def decide(
-        self,
-        ml_signal: str,
-        ml_confidence: float,
-        agent_signal: str,
-        agent_confidence: float,
-        market_state: str | None = None,
-    ) -> tuple[str, float, str]:
-        """規則引擎決策
-
-        Args:
-            ml_signal: ML 模型信號 ("buy", "sell", "hold")
-            ml_confidence: ML 模型信心度 (0-1)
-            agent_signal: Agent 建議信號
-            agent_confidence: Agent 信心度
-            market_state: HMM 市場狀態 ("bull", "bear", "sideways")
-
-        Returns:
-            (final_action, final_confidence, reasoning)
-        """
-        # 動態權重: ML 有效預測時 60/40, 否則 Agent 全權
-        if ml_signal != "hold" and ml_confidence > 0.1:
-            ml_w, agent_w = 0.6, 0.4
-        else:
-            ml_w, agent_w = 0.0, 1.0
-
-        ml_score = self.SIGNAL_SCORE.get(ml_signal, 0.0) * ml_confidence
-        agent_score = self.SIGNAL_SCORE.get(agent_signal, 0.0) * agent_confidence
-
-        combined = ml_w * ml_score + agent_w * agent_score
-
-        # 市場狀態調整
-        state_scale = {"bear": 0.5, "sideways": 0.7, "bull": 1.0}
-        scale = state_scale.get(market_state, 0.7) if market_state else 1.0
-
-        adjusted = combined * scale
-
-        # 決策閾值 (降低: ±0.25 → ±0.15)
-        BUY_THRESHOLD = 0.15
-        SELL_THRESHOLD = -0.15
-
-        if adjusted > BUY_THRESHOLD:
-            action = "buy"
-        elif adjusted < SELL_THRESHOLD:
-            action = "sell"
-        else:
-            action = "hold"
-
-        confidence = min(abs(adjusted), 1.0)
-
-        # 建構推理說明
-        reasoning = (
-            f"規則引擎: ML({ml_signal} {ml_confidence:.0%}) × {ml_w} "
-            f"+ Agent({agent_signal} {agent_confidence:.0%}) × {agent_w} "
-            f"= {combined:.3f}"
-        )
-        if market_state:
-            reasoning += f" | 市場狀態={market_state} (scale={scale})"
-        reasoning += f" → {action} ({confidence:.0%})"
-
-        return action, confidence, reasoning
 
 
 class AgentOrchestrator:
@@ -123,16 +39,9 @@ class AgentOrchestrator:
 
     def __init__(
         self,
-        risk_limits: RiskLimits | None = None,
         session_factory=None,
         risk_manager: RiskManager | None = None,
     ):
-        # 風控 Agent（規則檢查）
-        self.risk = RiskAgent(limits=risk_limits)
-
-        # 規則引擎（保留向後相容）
-        self.rule_engine = RuleEngine()
-
         # Meta-Labeler（可選，由外部注入）
         self.meta_labeler = None
 
@@ -140,7 +49,7 @@ class AgentOrchestrator:
         self.risk_manager = risk_manager or RiskManager()
 
         # 記憶系統
-        self.memory = AgentMemorySystem(session_factory)
+        self.memory = ShortTermMemory()
 
         # 狀態
         self.last_decision: TradeDecision | None = None
@@ -272,7 +181,7 @@ class AgentOrchestrator:
             )
 
         # 記憶更新
-        self.memory.short_term.add(
+        self.memory.add(
             context.date,
             {
                 "stock_id": context.stock_id,

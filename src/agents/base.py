@@ -1,16 +1,9 @@
-"""基礎 Agent 類別 + 訊息格式
+"""Agent 訊息格式與資料結構"""
 
-所有 Agent 共用的介面與資料結構。
-"""
-
-import logging
-from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 from typing import Any
-
-logger = logging.getLogger(__name__)
 
 
 class AgentRole(str, Enum):
@@ -52,15 +45,10 @@ class MarketContext:
     stock_id: str
     current_price: float
     date: str  # YYYY-MM-DD
-    # 技術指標摘要
     technical_summary: dict[str, Any] = field(default_factory=dict)
-    # 情緒摘要
     sentiment_summary: dict[str, Any] = field(default_factory=dict)
-    # 基本面摘要
     fundamental_summary: dict[str, Any] = field(default_factory=dict)
-    # ML 模型預測
     model_predictions: dict[str, Any] = field(default_factory=dict)
-    # 持倉資訊
     position: dict[str, Any] = field(default_factory=dict)
 
 
@@ -78,24 +66,6 @@ class TradeDecision:
     reasoning: str = ""
     approved_by_risk: bool = False
     risk_notes: str = ""
-    # 各 Agent 分析結果
     analyst_reports: list[AgentMessage] = field(default_factory=list)
     researcher_report: AgentMessage | None = None
     timestamp: datetime = field(default_factory=datetime.now)
-
-
-class BaseAgent(ABC):
-    """所有 Agent 的基礎類別"""
-
-    def __init__(self, role: AgentRole):
-        self.role = role
-        self.logger = logging.getLogger(f"agent.{role.value}")
-
-    @abstractmethod
-    async def analyze(self, context: MarketContext) -> AgentMessage:
-        """執行分析，回傳結構化訊息"""
-        ...
-
-    def _format_prompt(self, template: str, **kwargs) -> str:
-        """格式化 LLM prompt"""
-        return template.format(**kwargs)

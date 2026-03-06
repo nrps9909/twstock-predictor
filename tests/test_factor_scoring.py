@@ -4,7 +4,6 @@ Covers:
 - Individual _compute_* functions (20 factors)
 - Weight engine with regime adjustment + missing data redistribution
 - Confidence calculator with risk discounts
-- RuleEngine dynamic weights
 - IC tracking DB functions
 - score_stock() integration
 """
@@ -58,8 +57,6 @@ from api.services.market_service import (
     STOCK_SECTOR,
     DEFAULT_SECTOR,
 )
-
-from src.agents.orchestrator import RuleEngine
 
 
 # ── Helpers ────────────────────────────────────────────
@@ -925,93 +922,6 @@ class TestConfidence:
         weights = {}
         conf = _compute_confidence(factors, weights, 0.5, pd.DataFrame())
         assert conf["confidence"] >= 0.0
-
-
-# ═══════════════════════════════════════════════════════
-# Tests: RuleEngine
-# ═══════════════════════════════════════════════════════
-
-
-class TestRuleEngine:
-    def setup_method(self):
-        self.engine = RuleEngine()
-
-    def test_ml_active_uses_60_40(self):
-        """When ML has signal, use 60/40 split"""
-        action, conf, reason = self.engine.decide(
-            ml_signal="buy", ml_confidence=0.8,
-            agent_signal="buy", agent_confidence=0.7,
-            market_state="bull",
-        )
-        assert action == "buy"
-        assert "× 0.6" in reason
-        assert "× 0.4" in reason
-
-    def test_ml_hold_uses_agent_100(self):
-        """When ML is hold, Agent gets 100%"""
-        action, conf, reason = self.engine.decide(
-            ml_signal="hold", ml_confidence=0.5,
-            agent_signal="buy", agent_confidence=0.7,
-            market_state="bull",
-        )
-        assert "× 0.0" in reason or "× 0" in reason
-        assert "× 1.0" in reason or "× 1" in reason
-
-    def test_ml_low_confidence_uses_agent_100(self):
-        """When ML confidence <= 0.1, Agent gets 100%"""
-        action, conf, reason = self.engine.decide(
-            ml_signal="buy", ml_confidence=0.05,
-            agent_signal="sell", agent_confidence=0.8,
-            market_state="sideways",
-        )
-        assert action == "sell"
-
-    def test_agent_only_can_buy(self):
-        """Without ML, Agent buy signal → buy action (not always hold)"""
-        action, conf, reason = self.engine.decide(
-            ml_signal="hold", ml_confidence=0.0,
-            agent_signal="buy", agent_confidence=0.8,
-            market_state="bull",
-        )
-        # Agent 100%: 0.5 * 0.8 = 0.4, × bull scale 1.0 = 0.4 > 0.15
-        assert action == "buy"
-
-    def test_agent_only_can_sell(self):
-        """Without ML, Agent sell signal → sell action"""
-        action, conf, reason = self.engine.decide(
-            ml_signal="hold", ml_confidence=0.0,
-            agent_signal="sell", agent_confidence=0.8,
-            market_state="bull",
-        )
-        # Agent 100%: -0.5 * 0.8 = -0.4, × bull scale 1.0 = -0.4 < -0.15
-        assert action == "sell"
-
-    def test_bear_market_reduces_signal(self):
-        """Bear market applies 0.5 scale"""
-        action_bull, _, _ = self.engine.decide(
-            ml_signal="buy", ml_confidence=0.6,
-            agent_signal="buy", agent_confidence=0.5,
-            market_state="bull",
-        )
-        action_bear, _, _ = self.engine.decide(
-            ml_signal="buy", ml_confidence=0.6,
-            agent_signal="buy", agent_confidence=0.5,
-            market_state="bear",
-        )
-        # Same signals but bear market is more conservative
-        assert action_bull == "buy"
-        # Bear may or may not be hold depending on threshold
-
-    def test_threshold_lowered(self):
-        """Verify ±0.15 threshold (not ±0.25)"""
-        # ML buy 0.5 * 0.4 = 0.2, Agent buy 0.5 * 0.4 = 0.2
-        # combined = 0.6*0.2 + 0.4*0.2 = 0.2, × 1.0 = 0.2 > 0.15 → buy
-        action, _, _ = self.engine.decide(
-            ml_signal="buy", ml_confidence=0.4,
-            agent_signal="buy", agent_confidence=0.4,
-            market_state="bull",
-        )
-        assert action == "buy"
 
 
 # ═══════════════════════════════════════════════════════
