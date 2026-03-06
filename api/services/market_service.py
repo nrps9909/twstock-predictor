@@ -1984,21 +1984,28 @@ def _compute_margin_quality(
             # Look-ahead bias fix: filter out quarterly data not yet publicly filed.
             # Taiwan companies must file quarterly reports within 45 days of quarter end.
             today = date.today()
-            if hasattr(qis.columns, "to_pydatetime"):
-                avail_cols = []
-                for col in qis.columns:
-                    try:
-                        q_end = pd.Timestamp(col).date()
-                        filing_deadline = q_end + timedelta(days=45)
-                        if filing_deadline <= today:
-                            avail_cols.append(col)
-                    except Exception:
+            avail_cols = []
+            skipped = 0
+            for col in qis.columns:
+                try:
+                    q_end = pd.Timestamp(col).date()
+                    filing_deadline = q_end + timedelta(days=45)
+                    if filing_deadline <= today:
                         avail_cols.append(col)
-                if avail_cols:
-                    qis = qis[avail_cols]
-                if qis.shape[1] < 2:
-                    components["note"] = "insufficient_after_filing_date_filter"
-                    # Fall through to yfinance fallback below
+                except (ValueError, TypeError):
+                    # Unparseable column — skip it (do NOT include)
+                    skipped += 1
+            if skipped:
+                logger.debug(
+                    "margin_quality: skipped %d unparseable date columns", skipped
+                )
+            if avail_cols:
+                qis = qis[avail_cols]
+            else:
+                qis = pd.DataFrame()  # No columns passed filter
+            if qis.empty or qis.shape[1] < 2:
+                components["note"] = "insufficient_after_filing_date_filter"
+                # Fall through to yfinance fallback below
 
             # Parse gross margin from quarterly data
             gross_profit = None
@@ -3307,14 +3314,10 @@ async def run_market_scan(top_n: int = 40) -> AsyncGenerator[str, None]:
                     trainer.predict, start_date=pred_start, end_date=end_str
                 )
                 if result is not None:
-                    sig_map = {
-                        "strong_buy": 0.9,
-                        "buy": 0.75,
-                        "hold": 0.5,
-                        "sell": 0.25,
-                        "strong_sell": 0.1,
-                    }
-                    ml_scores[sid] = sig_map.get(result.signal, 0.5)
+                    # Continuous sigmoid score (consistent with unified pipeline)
+                    total_return = float(result.predicted_returns.sum())
+                    score = 1.0 / (1.0 + np.exp(-total_return * 50.0))
+                    ml_scores[sid] = max(0.05, min(0.95, score))
             except Exception as e:
                 logger.warning("ML predict failed for %s: %s", sid, e)
 
