@@ -11,7 +11,7 @@
 ## Project Structure
 - `web/` — Next.js frontend (App Router + Tailwind + Plotly charts)
 - `src/` — Core logic (agents, analysis, backtest, data, db, models, monitoring, pipeline, risk, utils)
-- `tests/` — 85 tests (pytest)
+- `tests/` — 186 tests (pytest)
 - `models/` — Trained model artifacts (.json, .pt)
 - `data/` — SQLite DB (twstock.db)
 
@@ -32,7 +32,7 @@
 - Haiku: sentiment extraction from news/posts
 - Sonnet: analysis narrative generation for users
 - Both called from `StockAnalysisService`, NOT via multi-agent debate
-- Legacy agent system in `src/agents/` is dead code (not used by v3.0 pipeline)
+- `src/agents/` contains only: `narrative_agent.py` (LLM calls), `orchestrator.py` (backward compat), `base.py` (dataclasses), `memory.py` (ShortTermMemory)
 - See skill: `agent-system` for details
 
 ## Risk Rules (NEVER OVERRIDE)
@@ -62,5 +62,5 @@
 - PurgedTimeSeriesSplit + CPCV for cross-validation
 - StackingEnsemble (LSTM + XGBoost) with meta-labeling
 - 3-state HMM regime detection
-- LLM narrative (Haiku sentiment + Sonnet narrative, legacy multi-agent is dead code)
+- LLM narrative (Haiku sentiment + Sonnet narrative)
 - Risk: ATR Trailing Stop + circuit breaker
