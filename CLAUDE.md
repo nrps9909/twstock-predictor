@@ -28,11 +28,12 @@
 - All numeric responses must sanitize NaN → `null` before JSON serialization
 - Frontend `SSE_BASE` points directly to backend (no proxy)
 
-## Agent System
-- 8-role multi-agent debate (technical/sentiment/fundamental/quant/researcher/trader/risk/orchestrator)
-- RuleEngine: ML 60% + Agent 40% when ML available; Agent 100% otherwise
-- LLM dual-layer: Haiku for sentiment extraction, Sonnet for narrative generation
-- See skill: `agent-system` for full architecture
+## LLM Integration
+- Haiku: sentiment extraction from news/posts
+- Sonnet: analysis narrative generation for users
+- Both called from `StockAnalysisService`, NOT via multi-agent debate
+- Legacy agent system in `src/agents/` is dead code (not used by v3.0 pipeline)
+- See skill: `agent-system` for details
 
 ## Risk Rules (NEVER OVERRIDE)
 - max_position: 20% per stock | max_portfolio_risk: 2% per trade
@@ -61,5 +62,5 @@
 - PurgedTimeSeriesSplit + CPCV for cross-validation
 - StackingEnsemble (LSTM + XGBoost) with meta-labeling
 - 3-state HMM regime detection
-- Multi-agent debate system (4 analysts + researcher + trader + risk)
+- LLM narrative (Haiku sentiment + Sonnet narrative, legacy multi-agent is dead code)
 - Risk: ATR Trailing Stop + circuit breaker
