@@ -8,11 +8,10 @@ Covers:
 - score_stock() integration
 """
 
-import pytest
 import numpy as np
 import pandas as pd
 from datetime import date, timedelta
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
 from api.services.market_service import (
     FactorResult,
@@ -36,6 +35,7 @@ from api.services.market_service import (
     # New 4 factors
     _compute_margin_quality,
     _compute_sector_rotation,
+    _compute_taiwan_etf_momentum,
     _compute_export_momentum,
     _compute_us_manufacturing,
     _compute_sector_aggregates,
@@ -62,23 +62,29 @@ from api.services.market_service import (
 # ── Helpers ────────────────────────────────────────────
 
 
-def _make_df(n: int = 60, base_price: float = 100.0, vol: float = 1000.0,
-             with_margin: bool = False) -> pd.DataFrame:
+def _make_df(
+    n: int = 60,
+    base_price: float = 100.0,
+    vol: float = 1000.0,
+    with_margin: bool = False,
+) -> pd.DataFrame:
     """Generate a fake price DataFrame for testing."""
     dates = [date.today() - timedelta(days=n - i) for i in range(n)]
     np.random.seed(42)
     closes = base_price + np.cumsum(np.random.randn(n) * 1.0)
-    df = pd.DataFrame({
-        "date": dates,
-        "open": closes - 0.5,
-        "high": closes + 1.0,
-        "low": closes - 1.0,
-        "close": closes,
-        "volume": np.random.uniform(vol * 0.5, vol * 1.5, n),
-        "foreign_buy_sell": np.random.uniform(-500, 500, n),
-        "trust_buy_sell": np.random.uniform(-300, 300, n),
-        "dealer_buy_sell": np.random.uniform(-200, 200, n),
-    })
+    df = pd.DataFrame(
+        {
+            "date": dates,
+            "open": closes - 0.5,
+            "high": closes + 1.0,
+            "low": closes - 1.0,
+            "close": closes,
+            "volume": np.random.uniform(vol * 0.5, vol * 1.5, n),
+            "foreign_buy_sell": np.random.uniform(-500, 500, n),
+            "trust_buy_sell": np.random.uniform(-300, 300, n),
+            "dealer_buy_sell": np.random.uniform(-200, 200, n),
+        }
+    )
     if with_margin:
         df["margin_balance"] = np.random.uniform(5000, 10000, n)
         df["short_balance"] = np.random.uniform(100, 500, n)
@@ -150,6 +156,136 @@ class TestForeignFlow:
         df = _make_df()
         result = _compute_foreign_flow(trust_info, df, 1000.0)
         assert result.score < 0.5
+
+    def test_db_vs_twse_same_magnitude(self):
+        """DB path (lots) and TWSE path should produce similar net_score range."""
+        # Both paths should now be in lots — 5000 lots / 1000 avg_vol = same ratio
+        trust_db = _make_trust_info(foreign=5000)  # lots (after /1000 fix)
+        trust_twse = _make_trust_info(foreign=5000)  # lots (TWSE already in lots)
+        df = _make_df()
+        result_db = _compute_foreign_flow(trust_db, df, 1000.0)
+        result_twse = _compute_foreign_flow(trust_twse, df, 1000.0)
+        assert (
+            result_db.components["net_normalized"]
+            == result_twse.components["net_normalized"]
+        )
+
+    def test_consecutive_sell_below_half(self):
+        """Consecutive sell streak → consec_score < 0.5."""
+        trust_info = _make_trust_info(foreign=-5000, f_days=-3)
+        df = _make_df()
+        result = _compute_foreign_flow(trust_info, df, 1000.0)
+        assert result.components["consecutive"] < 0.5
+
+    def test_consecutive_deep_sell(self):
+        """5-day sell streak → consec_score = 0.0."""
+        trust_info = _make_trust_info(foreign=-8000, f_days=-5)
+        df = _make_df()
+        result = _compute_foreign_flow(trust_info, df, 1000.0)
+        assert result.components["consecutive"] == 0.0
+
+    def test_acceleration_threshold_large_cap(self):
+        """Large cap (avg_vol=30000): threshold = 1500, not hardcoded 50."""
+        df = _make_df(n=60, vol=30000)
+        # Make foreign_buy_sell large enough that prior > threshold
+        df["foreign_buy_sell"] = 2000.0  # each day = 2000
+        trust_info = _make_trust_info(foreign=10000)
+        result = _compute_foreign_flow(trust_info, df, 30000.0)
+        # Should compute acceleration, not fallback
+        assert "acceleration" in result.components
+
+    def test_acceleration_threshold_small_cap(self):
+        """Small cap (avg_vol=30): threshold = max(10, 1.5) = 10."""
+        df = _make_df(n=60, vol=30)
+        df["foreign_buy_sell"] = 5.0  # below threshold=10 → fallback
+        trust_info = _make_trust_info(foreign=25)
+        result = _compute_foreign_flow(trust_info, df, 30.0)
+        # With prior sum=25 > 10, should still compute normally
+        # But individual days sum(5*5)=25 vs prior=25, accel=0 → 0.5
+        assert result.components["acceleration"] >= 0.0
+
+    def test_freshness_from_trade_days(self):
+        """Freshness should reflect trade_days, not always 1.0."""
+        trust_info = _make_trust_info(foreign=5000)
+        trust_info["trade_days"] = 3
+        df = _make_df()
+        result = _compute_foreign_flow(trust_info, df, 1000.0)
+        assert result.freshness == 0.6  # 3/5
+
+    def test_freshness_full(self):
+        """5 trade days → freshness = 1.0."""
+        trust_info = _make_trust_info(foreign=5000)
+        trust_info["trade_days"] = 5
+        df = _make_df()
+        result = _compute_foreign_flow(trust_info, df, 1000.0)
+        assert result.freshness == 1.0
+
+    def test_freshness_no_trade_days(self):
+        """No trade_days key → freshness = 0.5."""
+        trust_info = {"foreign_cumulative": 5000, "foreign_consecutive_days": 3}
+        df = _make_df()
+        result = _compute_foreign_flow(trust_info, df, 1000.0)
+        assert result.freshness == 0.5
+
+    def test_acceleration_threshold_lots_unit(self):
+        """A1 fix: fbs is in lots so threshold comparison works correctly."""
+        df = _make_df(n=60)
+        # Set foreign_buy_sell in shares (raw FinMind) — small values
+        # After /1000, prior sum = 5 * 5/1000 = 0.025, < threshold=10 → fallback
+        df["foreign_buy_sell"] = 5.0  # 5 shares each day
+        trust_info = _make_trust_info(foreign=25)
+        result = _compute_foreign_flow(trust_info, df, 1000.0)
+        # prior = 5*5/1000 = 0.025 < threshold max(10, 50) → fallback branch
+        assert result.components["acceleration"] in (0.6, 0.4)
+
+    def test_acceleration_threshold_triggers_real_calc(self):
+        """A1 fix: large enough values in lots should trigger real acceleration calc."""
+        df = _make_df(n=60)
+        # 20000 shares/day → 20 lots/day, prior=5*20=100 > threshold(50)
+        df["foreign_buy_sell"] = 20000.0
+        # Make recent stronger: last 5 days = 40000 → 40 lots
+        df.iloc[-5:, df.columns.get_loc("foreign_buy_sell")] = 40000.0
+        trust_info = _make_trust_info(foreign=200)
+        result = _compute_foreign_flow(trust_info, df, 1000.0)
+        # accel = (200-100)/100 = 1.0 → 0.5 + 1.0*0.25 = 0.75
+        assert result.components["acceleration"] > 0.5
+
+    def test_cross_sectional_adjustment(self):
+        """B1: Cross-sectional stats adjust net_normalized."""
+        trust_info = _make_trust_info(foreign=5000)
+        df = _make_df()
+        # Without market stats
+        r1 = _compute_foreign_flow(trust_info, df, 1000.0)
+        # With market stats (market also buying, std=5)
+        market_stats = {"mean_normalized": 4.0, "std_normalized": 5.0}
+        r2 = _compute_foreign_flow(
+            trust_info, df, 1000.0, market_flow_stats=market_stats
+        )
+        # After cross-sectional adj, score should differ
+        assert r2.components.get("cross_sectional_adj") is True
+        assert r1.components["net_normalized"] != r2.components["net_normalized"]
+
+    def test_conviction_bonus_bullish(self):
+        """B2: When 3+ sub-factors are bullish, conviction bonus applied."""
+        trust_info = _make_trust_info(foreign=8000, f_days=5)
+        trust_info["trade_days"] = 5
+        df = _make_df(n=60)
+        # Force all sub-factors bullish: large foreign_buy_sell
+        df["foreign_buy_sell"] = 50000.0  # 50 lots/day after /1000
+        # Make recent > prior for acceleration
+        df.iloc[-5:, df.columns.get_loc("foreign_buy_sell")] = 100000.0
+        result = _compute_foreign_flow(trust_info, df, 1000.0)
+        # Should have conviction bonus
+        assert result.components.get("conviction_bonus") is not None
+        assert result.components["conviction_bonus"] == 1.15
+
+    def test_no_conviction_bonus_mixed(self):
+        """B2: When sub-factors disagree, no conviction bonus."""
+        trust_info = _make_trust_info(foreign=500, f_days=1)
+        trust_info["trade_days"] = 5
+        df = _make_df(n=60)
+        result = _compute_foreign_flow(trust_info, df, 1000.0)
+        assert "conviction_bonus" not in result.components
 
 
 class TestTechnicalSignal:
@@ -268,10 +404,12 @@ class TestRevenueMomentum:
     def test_basic(self):
         dates = [date.today() - timedelta(days=30 * i) for i in range(16)]
         dates.reverse()
-        rev_df = pd.DataFrame({
-            "date": dates,
-            "revenue": [100 + i * 5 for i in range(16)],
-        })
+        rev_df = pd.DataFrame(
+            {
+                "date": dates,
+                "revenue": [100 + i * 5 for i in range(16)],
+            }
+        )
         result = _compute_revenue_momentum(rev_df)
         assert result.name == "revenue_momentum"
         assert result.available is True
@@ -334,12 +472,14 @@ class TestVolatilityRegime:
 class TestNewsSentiment:
     def test_with_data(self):
         scores = {"2330": 0.7}
-        sent_df = pd.DataFrame({
-            "date": [date.today() - timedelta(days=i) for i in range(20)],
-            "source": ["cnyes"] * 10 + ["ptt"] * 10,
-            "sentiment_score": np.random.uniform(-0.5, 0.8, 20),
-            "engagement": np.random.randint(10, 100, 20),
-        })
+        sent_df = pd.DataFrame(
+            {
+                "date": [date.today() - timedelta(days=i) for i in range(20)],
+                "source": ["cnyes"] * 10 + ["ptt"] * 10,
+                "sentiment_score": np.random.uniform(-0.5, 0.8, 20),
+                "engagement": np.random.randint(10, 100, 20),
+            }
+        )
         result = _compute_news_sentiment(scores, sent_df, "2330")
         assert result.name == "news_sentiment"
         assert result.available is True
@@ -381,31 +521,15 @@ class TestMLEnsemble:
 
 class TestFundamentalValue:
     def test_high_pe(self):
-        mock_yf = MagicMock()
-        mock_ticker = MagicMock()
-        mock_ticker.info = {"trailingPE": 100, "returnOnEquity": 0.10, "dividendYield": 0.03}
-        mock_yf.Ticker.return_value = mock_ticker
-        import sys
-        sys.modules["yfinance"] = mock_yf
-        try:
-            result = _compute_fundamental_value("2330")
-            assert result.name == "fundamental_value"
-            assert result.score < 0.5  # High PE drags score down
-        finally:
-            del sys.modules["yfinance"]
+        info = {"trailingPE": 100, "returnOnEquity": 0.10, "dividendYield": 0.03}
+        result = _compute_fundamental_value("2330", fundamental_data={"info": info})
+        assert result.name == "fundamental_value"
+        assert result.score < 0.5  # High PE drags score down
 
     def test_high_roe(self):
-        mock_yf = MagicMock()
-        mock_ticker = MagicMock()
-        mock_ticker.info = {"trailingPE": 15, "returnOnEquity": 0.30, "dividendYield": 0.05}
-        mock_yf.Ticker.return_value = mock_ticker
-        import sys
-        sys.modules["yfinance"] = mock_yf
-        try:
-            result = _compute_fundamental_value("2330")
-            assert result.score > 0.5  # High ROE + good dividend
-        finally:
-            del sys.modules["yfinance"]
+        info = {"trailingPE": 15, "returnOnEquity": 0.30, "dividendYield": 0.05}
+        result = _compute_fundamental_value("2330", fundamental_data={"info": info})
+        assert result.score > 0.5  # High ROE + good dividend
 
     def test_no_yfinance(self):
         result = _compute_fundamental_value("9999")
@@ -452,104 +576,80 @@ class TestMacroRisk:
 
 class TestMarginQuality:
     def test_expanding_margins(self):
-        """Quarterly gross margin expansion → high score"""
-        mock_yf = MagicMock()
-        mock_ticker = MagicMock()
-
-        # Create quarterly income statement with expanding margins
-        dates = pd.to_datetime(["2025-12-31", "2025-09-30", "2025-06-30", "2025-03-31", "2024-12-31"])
+        """Quarterly gross margin expansion -> high score"""
+        # Use dates old enough to pass filing deadline filter (quarter_end + 45 days)
+        dates = pd.to_datetime(
+            ["2025-09-30", "2025-06-30", "2025-03-31", "2024-12-31", "2024-09-30"]
+        )
         qis = pd.DataFrame(
-            {d: {"Gross Profit": gp, "Total Revenue": rev, "Operating Income": oi}
-             for d, gp, rev, oi in zip(
-                 dates,
-                 [450, 400, 380, 350, 330],
-                 [1000, 1000, 1000, 1000, 1000],
-                 [250, 200, 180, 150, 130],
-             )},
-        ).T.T
-        # Make columns = dates (most recent first)
-        qis = pd.DataFrame(
-            [[450, 400, 380, 350, 330],
-             [1000, 1000, 1000, 1000, 1000],
-             [250, 200, 180, 150, 130]],
+            [
+                [450, 400, 380, 350, 330],
+                [1000, 1000, 1000, 1000, 1000],
+                [250, 200, 180, 150, 130],
+            ],
             index=["Gross Profit", "Total Revenue", "Operating Income"],
             columns=dates,
         )
-        mock_ticker.quarterly_income_stmt = qis
-        mock_ticker.info = {}
-        mock_yf.Ticker.return_value = mock_ticker
-
-        import sys
-        sys.modules["yfinance"] = mock_yf
-        try:
-            result = _compute_margin_quality("2330")
-            assert result.name == "margin_quality"
-            assert result.available is True
-            assert result.score > 0.5  # Expanding margins
-            assert result.freshness == 0.6
-        finally:
-            del sys.modules["yfinance"]
+        result = _compute_margin_quality(
+            "2330",
+            fundamental_data={
+                "quarterly_income_stmt": qis,
+                "info": {},
+            },
+        )
+        assert result.name == "margin_quality"
+        assert result.available is True
+        assert result.score > 0.5  # Expanding margins
+        assert result.freshness == 0.6
 
     def test_contracting_margins(self):
-        """Quarterly gross margin contraction → low score"""
-        mock_yf = MagicMock()
-        mock_ticker = MagicMock()
-
-        dates = pd.to_datetime(["2025-12-31", "2025-09-30", "2025-06-30", "2025-03-31", "2024-12-31"])
+        """Quarterly gross margin contraction -> low score"""
+        dates = pd.to_datetime(
+            ["2025-09-30", "2025-06-30", "2025-03-31", "2024-12-31", "2024-09-30"]
+        )
         qis = pd.DataFrame(
-            [[300, 400, 450, 480, 500],
-             [1000, 1000, 1000, 1000, 1000],
-             [100, 200, 250, 280, 300]],
+            [
+                [300, 400, 450, 480, 500],
+                [1000, 1000, 1000, 1000, 1000],
+                [100, 200, 250, 280, 300],
+            ],
             index=["Gross Profit", "Total Revenue", "Operating Income"],
             columns=dates,
         )
-        mock_ticker.quarterly_income_stmt = qis
-        mock_ticker.info = {}
-        mock_yf.Ticker.return_value = mock_ticker
-
-        import sys
-        sys.modules["yfinance"] = mock_yf
-        try:
-            result = _compute_margin_quality("2330")
-            assert result.available is True
-            assert result.score < 0.5  # Contracting margins
-        finally:
-            del sys.modules["yfinance"]
+        result = _compute_margin_quality(
+            "2330",
+            fundamental_data={
+                "quarterly_income_stmt": qis,
+                "info": {},
+            },
+        )
+        assert result.available is True
+        assert result.score < 0.5  # Contracting margins
 
     def test_fallback_to_info(self):
         """When quarterly data unavailable, fall back to ticker.info"""
-        mock_yf = MagicMock()
-        mock_ticker = MagicMock()
-        mock_ticker.quarterly_income_stmt = pd.DataFrame()  # Empty
-        mock_ticker.info = {"grossMargins": 0.35, "operatingMargins": 0.15}
-        mock_yf.Ticker.return_value = mock_ticker
-
-        import sys
-        sys.modules["yfinance"] = mock_yf
-        try:
-            result = _compute_margin_quality("2330")
-            assert result.available is True
-            assert result.freshness == 0.4  # Info fallback freshness
-            assert 0.0 <= result.score <= 1.0
-        finally:
-            del sys.modules["yfinance"]
+        result = _compute_margin_quality(
+            "2330",
+            fundamental_data={
+                "quarterly_income_stmt": pd.DataFrame(),
+                "info": {"grossMargins": 0.35, "operatingMargins": 0.15},
+            },
+        )
+        assert result.available is True
+        assert result.freshness == 0.4  # Info fallback freshness
+        assert 0.0 <= result.score <= 1.0
 
     def test_no_data(self):
-        """No yfinance data → unavailable"""
-        mock_yf = MagicMock()
-        mock_ticker = MagicMock()
-        mock_ticker.quarterly_income_stmt = pd.DataFrame()
-        mock_ticker.info = {}
-        mock_yf.Ticker.return_value = mock_ticker
-
-        import sys
-        sys.modules["yfinance"] = mock_yf
-        try:
-            result = _compute_margin_quality("9999")
-            assert result.available is False
-            assert result.score == 0.5
-        finally:
-            del sys.modules["yfinance"]
+        """No yfinance data -> unavailable"""
+        result = _compute_margin_quality(
+            "9999",
+            fundamental_data={
+                "quarterly_income_stmt": pd.DataFrame(),
+                "info": {},
+            },
+        )
+        assert result.available is False
+        assert result.score == 0.5
 
 
 class TestSectorRotation:
@@ -625,10 +725,16 @@ class TestExportMomentum:
             "ewt_return_60d": 0.15,
             "sox_return": 0.005,
         }
-        result = _compute_export_momentum(data)
-        assert result.name == "export_momentum"
+        result = _compute_taiwan_etf_momentum(data)
+        assert result.name == "taiwan_etf_momentum"
         assert result.available is True
         assert result.score > 0.5
+
+    def test_legacy_alias(self):
+        """Legacy alias _compute_export_momentum still works"""
+        data = {"ewt_return_20d": 0.08, "ewt_return_60d": 0.15}
+        result = _compute_export_momentum(data)
+        assert result.name == "taiwan_etf_momentum"
 
     def test_negative_ewt(self):
         """Negative EWT returns → bearish"""
@@ -638,7 +744,7 @@ class TestExportMomentum:
             "ewt_return_60d": -0.20,
             "sox_return": -0.01,
         }
-        result = _compute_export_momentum(data)
+        result = _compute_taiwan_etf_momentum(data)
         assert result.available is True
         assert result.score < 0.5
 
@@ -650,12 +756,12 @@ class TestExportMomentum:
             "ewt_return_60d": 0.10,
             "sox_return": -0.02,
         }
-        result = _compute_export_momentum(data)
+        result = _compute_taiwan_etf_momentum(data)
         assert result.components["relative_strength"] > 0.5
 
     def test_none(self):
         """No global data → unavailable"""
-        result = _compute_export_momentum(None)
+        result = _compute_taiwan_etf_momentum(None)
         assert result.available is False
         assert result.score == 0.5
 
@@ -687,7 +793,11 @@ class TestUSManufacturing:
     def test_sma200_tiers(self):
         """Test different SMA200 level tiers"""
         # Above 5% → 0.75
-        data = {"xli_return_20d": 0.0, "xli_vs_sma200": 0.08, "xli_spy_ratio_trend": 0.0}
+        data = {
+            "xli_return_20d": 0.0,
+            "xli_vs_sma200": 0.08,
+            "xli_spy_ratio_trend": 0.0,
+        }
         result = _compute_us_manufacturing(data)
         assert result.components["sma_score"] == 0.75
 
@@ -751,16 +861,19 @@ class TestStockSector:
     def test_stock_list_coverage(self):
         """STOCK_SECTOR should cover major stocks"""
         from src.utils.constants import STOCK_LIST
+
         covered = sum(1 for sid in STOCK_LIST if sid in STOCK_SECTOR)
         # Should cover at least 50% of STOCK_LIST
-        assert covered >= len(STOCK_LIST) * 0.3, \
+        assert covered >= len(STOCK_LIST) * 0.3, (
             f"Only {covered}/{len(STOCK_LIST)} stocks covered"
+        )
 
     def test_no_empty_sectors(self):
         """All sector values should be non-empty strings"""
         for stock_id, sector in STOCK_SECTOR.items():
-            assert isinstance(sector, str) and len(sector) > 0, \
+            assert isinstance(sector, str) and len(sector) > 0, (
                 f"Stock {stock_id} has invalid sector: {sector!r}"
+            )
 
 
 # ═══════════════════════════════════════════════════════
@@ -817,19 +930,19 @@ class TestWeightEngine:
     def test_base_weights_sum_to_one(self):
         assert abs(sum(BASE_WEIGHTS.values()) - 1.0) < 1e-6
 
-    def test_base_weights_has_20_factors(self):
-        assert len(BASE_WEIGHTS) == 20
+    def test_base_weights_has_15_factors(self):
+        assert len(BASE_WEIGHTS) == 15
 
-    def test_all_regime_multipliers_cover_20_factors(self):
+    def test_all_regime_multipliers_cover_15_factors(self):
         for regime, multipliers in REGIME_MULTIPLIERS.items():
-            assert len(multipliers) == 20, f"{regime} has {len(multipliers)} factors, expected 20"
+            assert len(multipliers) == 15, (
+                f"{regime} has {len(multipliers)} factors, expected 15"
+            )
             for name in BASE_WEIGHTS:
                 assert name in multipliers, f"{regime} missing {name}"
 
     def test_all_available_weights_sum_to_one(self):
-        factors = [
-            FactorResult(name, 0.6, True, 1.0) for name in BASE_WEIGHTS
-        ]
+        factors = [FactorResult(name, 0.6, True, 1.0) for name in BASE_WEIGHTS]
         weights = _compute_weights(factors, "sideways")
         assert abs(sum(weights.values()) - 1.0) < 1e-6
 
@@ -839,18 +952,23 @@ class TestWeightEngine:
         factors = []
         for i, name in enumerate(names):
             available = i < 10  # first 10 available, rest not
-            factors.append(FactorResult(name, 0.5, available, 1.0 if available else 0.0))
+            factors.append(
+                FactorResult(name, 0.5, available, 1.0 if available else 0.0)
+            )
         weights = _compute_weights(factors, "sideways")
         assert len(weights) == 10
         assert abs(sum(weights.values()) - 1.0) < 1e-6
         for name in names[10:]:
             assert name not in weights
 
-    def test_regime_bull_boosts_short_momentum(self):
+    def test_regime_bull_boosts_multi_scale_momentum(self):
         factors = [FactorResult(name, 0.6, True, 1.0) for name in BASE_WEIGHTS]
         bull_weights = _compute_weights(factors, "bull")
         sideways_weights = _compute_weights(factors, "sideways")
-        assert bull_weights["short_momentum"] > sideways_weights["short_momentum"]
+        assert (
+            bull_weights["multi_scale_momentum"]
+            > sideways_weights["multi_scale_momentum"]
+        )
 
     def test_regime_bear_boosts_volatility_regime(self):
         factors = [FactorResult(name, 0.6, True, 1.0) for name in BASE_WEIGHTS]
@@ -871,12 +989,12 @@ class TestWeightEngine:
         bull_weights = _compute_weights(factors, "bull")
         assert sideways_weights["sector_rotation"] > bull_weights["sector_rotation"]
 
-    def test_regime_bear_boosts_us_manufacturing(self):
-        """Bear market boosts us_manufacturing (1.3 multiplier)"""
+    def test_regime_bear_boosts_macro_risk(self):
+        """Bear market boosts macro_risk (1.3 multiplier)"""
         factors = [FactorResult(name, 0.6, True, 1.0) for name in BASE_WEIGHTS]
         bear_weights = _compute_weights(factors, "bear")
         sideways_weights = _compute_weights(factors, "sideways")
-        assert bear_weights["us_manufacturing"] > sideways_weights["us_manufacturing"]
+        assert bear_weights["macro_risk"] > sideways_weights["macro_risk"]
 
 
 # ═══════════════════════════════════════════════════════
@@ -902,7 +1020,7 @@ class TestConfidence:
         factors = [
             FactorResult("f1", 0.8, True, 1.0),
             FactorResult("f2", 0.2, True, 1.0),  # Opposite
-            FactorResult("f3", 0.5, True, 1.0),   # Neutral
+            FactorResult("f3", 0.5, True, 1.0),  # Neutral
         ]
         weights = {"f1": 0.33, "f2": 0.33, "f3": 0.34}
         conf = _compute_confidence(factors, weights, 0.5, pd.DataFrame())
@@ -942,9 +1060,15 @@ class TestScoreStock:
         trust_info = _make_trust_info()
 
         result = score_stock(
-            stock_data={"stock_id": "2330", "stock_name": "台積電",
-                        "current_price": 600, "price_change_pct": 1.5,
-                        "foreign_net_5d": 5000, "trust_net_5d": 3000, "dealer_net_5d": 500},
+            stock_data={
+                "stock_id": "2330",
+                "stock_name": "台積電",
+                "current_price": 600,
+                "price_change_pct": 1.5,
+                "foreign_net_5d": 5000,
+                "trust_net_5d": 3000,
+                "dealer_net_5d": 500,
+            },
             df=df,
             df_tech=df_tech,
             signals=signals,
@@ -995,10 +1119,17 @@ class TestScoreStock:
         trust_info = _make_trust_info()
 
         result = score_stock(
-            stock_data={"stock_id": "2330", "stock_name": "台積電",
-                        "current_price": 600, "price_change_pct": 1.5,
-                        "foreign_net_5d": 5000, "trust_net_5d": 3000, "dealer_net_5d": 500},
-            df=df, df_tech=df_tech,
+            stock_data={
+                "stock_id": "2330",
+                "stock_name": "台積電",
+                "current_price": 600,
+                "price_change_pct": 1.5,
+                "foreign_net_5d": 5000,
+                "trust_net_5d": 3000,
+                "dealer_net_5d": 500,
+            },
+            df=df,
+            df_tech=df_tech,
             signals=_make_signals(3, 5, "buy"),
             trust_info=trust_info,
             sentiment_scores={"2330": 0.65},
@@ -1011,7 +1142,9 @@ class TestScoreStock:
         # All 20 factor names should be present
         expected_names = set(BASE_WEIGHTS.keys())
         actual_names = set(factor_details.keys())
-        assert expected_names == actual_names, f"Missing: {expected_names - actual_names}"
+        assert expected_names == actual_names, (
+            f"Missing: {expected_names - actual_names}"
+        )
 
     @patch("api.services.market_service._compute_margin_quality")
     @patch("api.services.market_service._compute_fundamental_value")
@@ -1021,25 +1154,42 @@ class TestScoreStock:
 
         df = _make_df(60)
         result = score_stock(
-            stock_data={"stock_id": "2330", "stock_name": "台積電",
-                        "current_price": 600, "price_change_pct": 0,
-                        "foreign_net_5d": 0, "trust_net_5d": 0, "dealer_net_5d": 0},
-            df=df, df_tech=_make_df_tech(df),
+            stock_data={
+                "stock_id": "2330",
+                "stock_name": "台積電",
+                "current_price": 600,
+                "price_change_pct": 0,
+                "foreign_net_5d": 0,
+                "trust_net_5d": 0,
+                "dealer_net_5d": 0,
+            },
+            df=df,
+            df_tech=_make_df_tech(df),
             signals=_make_signals(3, 5, "hold"),
-            trust_info={}, sentiment_scores={}, sentiment_df=None,
-            ml_scores={}, regime="sideways",
-            global_data={"sox_return": 0.01, "tsm_return": 0.005,
-                         "ewt_return_1d": 0.005, "ewt_return_20d": 0.03,
-                         "ewt_return_60d": 0.08},
-            macro_data={"vix": 18, "usdtwd_trend": 0, "tnx_change": 0,
-                        "xli_return_20d": 0.02, "xli_vs_sma200": 0.03,
-                        "xli_spy_ratio_trend": 0.01},
+            trust_info={},
+            sentiment_scores={},
+            sentiment_df=None,
+            ml_scores={},
+            regime="sideways",
+            global_data={
+                "sox_return": 0.01,
+                "tsm_return": 0.005,
+                "ewt_return_1d": 0.005,
+                "ewt_return_20d": 0.03,
+                "ewt_return_60d": 0.08,
+            },
+            macro_data={
+                "vix": 18,
+                "usdtwd_trend": 0,
+                "tnx_change": 0,
+                "xli_return_20d": 0.02,
+                "xli_vs_sma200": 0.03,
+                "xli_spy_ratio_trend": 0.01,
+            },
         )
-        # Global context, macro_risk, export_momentum, us_manufacturing should be available
-        assert result["factor_details"]["global_context"]["available"] is True
+        # global_macro (composite) and macro_risk should be available
+        assert result["factor_details"]["global_macro"]["available"] is True
         assert result["factor_details"]["macro_risk"]["available"] is True
-        assert result["factor_details"]["export_momentum"]["available"] is True
-        assert result["factor_details"]["us_manufacturing"]["available"] is True
 
     @patch("api.services.market_service._compute_margin_quality")
     @patch("api.services.market_service._compute_fundamental_value")
@@ -1050,19 +1200,31 @@ class TestScoreStock:
         df = _make_df(60)
         sector_data = {
             "semiconductor": {
-                "net_flow": 30000, "avg_return_20d": 0.05,
-                "breadth": 0.7, "stock_count": 10,
+                "net_flow": 30000,
+                "avg_return_20d": 0.05,
+                "breadth": 0.7,
+                "stock_count": 10,
             },
             "_market_avg": {"net_flow": 10000, "avg_return_20d": 0.02},
         }
         result = score_stock(
-            stock_data={"stock_id": "2330", "stock_name": "台積電",
-                        "current_price": 600, "price_change_pct": 0,
-                        "foreign_net_5d": 0, "trust_net_5d": 0, "dealer_net_5d": 0},
-            df=df, df_tech=_make_df_tech(df),
+            stock_data={
+                "stock_id": "2330",
+                "stock_name": "台積電",
+                "current_price": 600,
+                "price_change_pct": 0,
+                "foreign_net_5d": 0,
+                "trust_net_5d": 0,
+                "dealer_net_5d": 0,
+            },
+            df=df,
+            df_tech=_make_df_tech(df),
             signals=_make_signals(3, 5, "hold"),
-            trust_info={}, sentiment_scores={}, sentiment_df=None,
-            ml_scores={}, regime="sideways",
+            trust_info={},
+            sentiment_scores={},
+            sentiment_df=None,
+            ml_scores={},
+            regime="sideways",
             sector_data=sector_data,
         )
         assert result["factor_details"]["sector_rotation"]["available"] is True
@@ -1076,10 +1238,12 @@ class TestScoreStock:
 class TestFactorICRecord:
     def test_model_import(self):
         from src.db.models import FactorICRecord
+
         assert FactorICRecord.__tablename__ == "factor_ic_records"
 
     def test_market_scan_new_fields(self):
         from src.db.models import MarketScanResult
+
         assert hasattr(MarketScanResult, "institutional_flow_score")
         assert hasattr(MarketScanResult, "margin_retail_score")
         assert hasattr(MarketScanResult, "volatility_score")

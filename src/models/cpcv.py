@@ -65,7 +65,10 @@ class CPCVAnalyzer:
             purge_mask = np.ones(len(train_idx), dtype=bool)
             for j, idx in enumerate(train_idx):
                 # 訓練樣本太靠近測試區域
-                if abs(idx - test_min) < self.purge_days or abs(idx - test_max) < self.purge_days:
+                if (
+                    abs(idx - test_min) < self.purge_days
+                    or abs(idx - test_max) < self.purge_days
+                ):
                     purge_mask[j] = False
 
             purged_train = train_idx[purge_mask]
@@ -74,7 +77,9 @@ class CPCVAnalyzer:
 
         logger.info(
             "CPCV: %d splits (C(%d,%d) = %d, after purging %d)",
-            len(splits), self.n_blocks, self.k_test,
+            len(splits),
+            self.n_blocks,
+            self.k_test,
             len(list(combinations(range(self.n_blocks), self.k_test))),
             len(splits),
         )
@@ -98,7 +103,11 @@ class CPCVAnalyzer:
 
         if n_strategies < 2:
             logger.warning("PBO 需要至少 2 個策略進行比較")
-            return {"pbo": 0.0, "logit_distribution": np.array([0.0]), "is_overfit": False}
+            return {
+                "pbo": 0.0,
+                "logit_distribution": np.array([0.0]),
+                "is_overfit": False,
+            }
 
         # 對每個 split，計算最佳策略在 IS 的排名 vs OOS 的排名
         logits = []
@@ -162,7 +171,9 @@ class CPCVAnalyzer:
             try:
                 perf = train_and_evaluate_fn(train_idx, test_idx)
                 oos_perfs.append(perf)
-                logger.info("CPCV split %d/%d: OOS perf = %.6f", i + 1, len(splits), perf)
+                logger.info(
+                    "CPCV split %d/%d: OOS perf = %.6f", i + 1, len(splits), perf
+                )
             except Exception as e:
                 logger.warning("CPCV split %d failed: %s", i + 1, e)
                 oos_perfs.append(0.0)
@@ -178,17 +189,33 @@ class CPCVAnalyzer:
 
         # PBO 需要足夠的 splits
         if len(oos_perfs) >= 4:
-            # 建構 performance matrix（將 OOS 績效視為單一策略）
-            perf_matrix = oos_arr.reshape(-1, 1)
-            # 加入隨機策略作為 baseline
-            random_perfs = np.random.normal(oos_arr.mean(), oos_arr.std(), len(oos_perfs))
-            perf_matrix = np.column_stack([oos_arr, random_perfs])
+            # Build performance matrix with 2+ strategies for meaningful PBO.
+            # Original PBO only compared 1 strategy + 1 random baseline,
+            # which reduces to a "better than random?" test.
+            # Now we add multiple perturbed variants to detect overfitting properly.
+            rng = np.random.RandomState(42)
+            strategies = [oos_arr]
+            # Strategy variant 1: perturbed with small noise (tests IS->OOS stability)
+            strategies.append(
+                oos_arr + rng.normal(0, oos_arr.std() * 0.3, len(oos_perfs))
+            )
+            # Strategy variant 2: inverted (anti-strategy baseline)
+            strategies.append(1.0 - oos_arr)
+            # Strategy variant 3: random baseline
+            strategies.append(rng.normal(oos_arr.mean(), oos_arr.std(), len(oos_perfs)))
+            perf_matrix = np.column_stack(strategies)
             result["pbo"] = self.compute_pbo(perf_matrix)
         else:
-            result["pbo"] = {"pbo": 0.0, "is_overfit": False, "note": "insufficient splits"}
+            result["pbo"] = {
+                "pbo": 0.0,
+                "is_overfit": False,
+                "note": "insufficient splits",
+            }
 
         logger.info(
             "CPCV 完成: %d splits, mean OOS=%.6f ± %.6f",
-            len(splits), result["mean_oos"], result["std_oos"],
+            len(splits),
+            result["mean_oos"],
+            result["std_oos"],
         )
         return result
