@@ -4,7 +4,7 @@ Position 追蹤、最多 5 檔持倉、產業分散限制
 """
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import date
 
 logger = logging.getLogger(__name__)
@@ -13,6 +13,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class Position:
     """單一持倉"""
+
     stock_id: str
     quantity: int  # 股數
     avg_cost: float  # 平均成本
@@ -72,8 +73,7 @@ class PortfolioManager:
         # 產業分散檢查
         if sector:
             sector_value = sum(
-                p.market_value for p in self.positions.values()
-                if p.sector == sector
+                p.market_value for p in self.positions.values() if p.sector == sector
             )
             if sector_value / max(self.total_value, 1) > self.max_sector_pct:
                 return False, f"產業 {sector} 佔比過高"
@@ -110,7 +110,10 @@ class PortfolioManager:
         )
         logger.info(
             "建倉 %s: %d 股 @ %.2f (手續費 %.0f)",
-            stock_id, quantity, price, commission,
+            stock_id,
+            quantity,
+            price,
+            commission,
         )
         return True
 
@@ -144,7 +147,11 @@ class PortfolioManager:
 
         logger.info(
             "平倉 %s: %d 股 @ %.2f | PnL: %.0f (%.2f%%)",
-            stock_id, pos.quantity, price, pnl, trade_record["pnl_pct"] * 100,
+            stock_id,
+            pos.quantity,
+            price,
+            pnl,
+            trade_record["pnl_pct"] * 100,
         )
         return trade_record
 
@@ -163,10 +170,14 @@ class PortfolioManager:
             if price is None:
                 continue
             if pos.stop_loss and price <= pos.stop_loss:
-                logger.warning("停損觸發 %s: %.2f <= %.2f", stock_id, price, pos.stop_loss)
+                logger.warning(
+                    "停損觸發 %s: %.2f <= %.2f", stock_id, price, pos.stop_loss
+                )
                 to_close.append(stock_id)
             elif pos.take_profit and price >= pos.take_profit:
-                logger.info("止盈觸發 %s: %.2f >= %.2f", stock_id, price, pos.take_profit)
+                logger.info(
+                    "止盈觸發 %s: %.2f >= %.2f", stock_id, price, pos.take_profit
+                )
                 to_close.append(stock_id)
         return to_close
 

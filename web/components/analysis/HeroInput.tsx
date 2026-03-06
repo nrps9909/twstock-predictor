@@ -1,29 +1,28 @@
 "use client";
 
 import { useState, useRef, useEffect } from "react";
+import Link from "next/link";
 import { STOCK_LIST } from "@/lib/constants";
-import { Search, Loader2, X } from "lucide-react";
+import { Search, Loader2, X, Clock } from "lucide-react";
 
 interface HeroInputProps {
   onAnalyze: (stockId: string) => void;
   onAbort: () => void;
   isRunning: boolean;
-  isCompact: boolean;
-  currentStock?: string | null;
 }
 
 const QUICK_PICKS = ["2330", "2317", "2454", "2881", "2303", "2308"];
 
-export function HeroInput({ onAnalyze, onAbort, isRunning, isCompact, currentStock }: HeroInputProps) {
+export function HeroInput({ onAnalyze, onAbort, isRunning }: HeroInputProps) {
   const [input, setInput] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
 
   // Auto-focus on mount
   useEffect(() => {
-    if (!isRunning && !isCompact) {
+    if (!isRunning) {
       inputRef.current?.focus();
     }
-  }, [isRunning, isCompact]);
+  }, [isRunning]);
 
   const handleSubmit = () => {
     const trimmed = input.trim();
@@ -42,48 +41,16 @@ export function HeroInput({ onAnalyze, onAbort, isRunning, isCompact, currentSto
     if (e.key === "Enter") handleSubmit();
   };
 
-  // Compact mode (after analysis complete)
-  if (isCompact && currentStock) {
-    return (
-      <div className="flex items-center justify-center gap-4 py-4">
-        <div className="flex items-center gap-2">
-          <span className="font-num text-lg font-bold" style={{ color: "var(--accent-gold)" }}>
-            {currentStock}
-          </span>
-          {STOCK_LIST[currentStock] && (
-            <span className="text-sm" style={{ color: "var(--text-secondary)" }}>
-              {STOCK_LIST[currentStock]}
-            </span>
-          )}
-        </div>
-        <button
-          onClick={() => {
-            setInput("");
-            onAnalyze(currentStock);
-          }}
-          className="rounded-lg px-3 py-1.5 text-xs font-medium transition-all duration-200"
-          style={{
-            background: "rgba(201,168,76,0.08)",
-            border: "1px solid rgba(201,168,76,0.15)",
-            color: "var(--accent-gold)",
-          }}
-        >
-          重新分析
-        </button>
-      </div>
-    );
-  }
-
   return (
     <div
-      className="flex flex-col items-center justify-center transition-all duration-500"
-      style={{ minHeight: isRunning ? "auto" : "50vh" }}
+      className="flex flex-col items-center justify-center transition-all duration-500 pt-16 pb-8"
+      style={{ minHeight: isRunning ? "auto" : undefined }}
     >
       {/* Title */}
       {!isRunning && (
         <div className="text-center mb-8">
           <h1
-            className="font-display text-4xl md:text-5xl tracking-[0.15em] mb-3"
+            className="font-display text-2xl md:text-3xl tracking-[0.15em] mb-3"
             style={{ color: "var(--accent-gold)" }}
           >
             台股 AI 預測
@@ -91,6 +58,14 @@ export function HeroInput({ onAnalyze, onAbort, isRunning, isCompact, currentSto
           <p className="text-sm" style={{ color: "var(--text-muted)" }}>
             統一 6 階段管線 — 20 因子評分 + LLM 敘事
           </p>
+          <Link
+            href="/history"
+            className="inline-flex items-center gap-1 mt-3 text-[10px] font-medium transition-all hover:opacity-80"
+            style={{ color: "var(--text-muted)" }}
+          >
+            <Clock className="h-3 w-3" />
+            歷史紀錄
+          </Link>
         </div>
       )}
 

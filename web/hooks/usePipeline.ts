@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback, useRef } from "react";
+import { useState, useCallback, useRef, useEffect } from "react";
 import { api } from "@/lib/api";
 import type { PipelineEvent, AnalysisPhase, AnalysisResult } from "@/lib/types";
 
@@ -21,21 +21,43 @@ const INITIAL_PHASES: Record<AnalysisPhase, PhaseState> = {
   finalize: { status: "pending", message: "" },
 };
 
+// Module-level cache: survives page navigation without unmount losing state
+let cachedState: PipelineState = "idle";
+let cachedResult: AnalysisResult | null = null;
+let cachedError: string | null = null;
+let cachedProgress = 0;
+let cachedPhases: Record<AnalysisPhase, PhaseState> = { ...INITIAL_PHASES };
+
 export function usePipeline() {
-  const [state, setState] = useState<PipelineState>("idle");
-  const [progress, setProgress] = useState(0);
-  const [phases, setPhases] = useState<Record<AnalysisPhase, PhaseState>>({ ...INITIAL_PHASES });
-  const [result, setResult] = useState<AnalysisResult | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [state, _setState] = useState<PipelineState>(cachedState);
+  const [progress, _setProgress] = useState(cachedProgress);
+  const [phases, _setPhases] = useState<Record<AnalysisPhase, PhaseState>>(cachedPhases);
+  const [result, _setResult] = useState<AnalysisResult | null>(cachedResult);
+  const [error, _setError] = useState<string | null>(cachedError);
   const controllerRef = useRef<AbortController | null>(null);
+
+  // Wrap setters to also update module-level cache
+  const setState = useCallback((v: PipelineState) => { cachedState = v; _setState(v); }, []);
+  const setProgress = useCallback((v: number) => { cachedProgress = v; _setProgress(v); }, []);
+  const setResult = useCallback((v: AnalysisResult | null) => { cachedResult = v; _setResult(v); }, []);
+  const setError = useCallback((v: string | null) => { cachedError = v; _setError(v); }, []);
+  const setPhases = useCallback((updater: (prev: Record<AnalysisPhase, PhaseState>) => Record<AnalysisPhase, PhaseState>) => {
+    _setPhases((prev) => {
+      const next = updater(prev);
+      cachedPhases = next;
+      return next;
+    });
+  }, []);
 
   const reset = useCallback(() => {
     setState("idle");
     setProgress(0);
     setResult(null);
     setError(null);
-    setPhases({ ...INITIAL_PHASES });
-  }, []);
+    const fresh = { ...INITIAL_PHASES };
+    cachedPhases = fresh;
+    _setPhases(fresh);
+  }, [setState, setProgress, setResult, setError]);
 
   const run = useCallback((stockId: string) => {
     // Abort previous run
@@ -79,7 +101,7 @@ export function usePipeline() {
     );
 
     controllerRef.current = controller;
-  }, [reset]);
+  }, [reset, setState, setProgress, setPhases, setResult, setError]);
 
   const abort = useCallback(() => {
     if (controllerRef.current) {
@@ -87,7 +109,7 @@ export function usePipeline() {
       controllerRef.current = null;
     }
     setState("idle");
-  }, []);
+  }, [setState]);
 
   return {
     state,

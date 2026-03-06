@@ -11,7 +11,7 @@ Output:
 """
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import numpy as np
 import pandas as pd
@@ -19,9 +19,38 @@ import pandas as pd
 logger = logging.getLogger(__name__)
 
 
+def direction_accuracy(
+    pred: np.ndarray, target: np.ndarray, epsilon: float = 0.003
+) -> float:
+    """Direction accuracy excluding near-zero targets (|target| < epsilon).
+
+    epsilon=0.003 filters out ±0.3% returns where direction is ambiguous
+    (e.g. Triple Barrier time-expiry with tiny drift).
+    """
+    mask = np.abs(target) > epsilon
+    if mask.sum() == 0:
+        return 0.5
+    return float(np.mean(np.sign(pred[mask]) == np.sign(target[mask])))
+
+
+def direction_accuracy_classify(pred: np.ndarray, tb_class: np.ndarray) -> float:
+    """Direction accuracy using Triple Barrier class labels {1, 0, -1}.
+
+    Excludes class=0 (time-expired with ambiguous direction).
+    Compares sign(pred) against tb_class sign.
+    """
+    mask = tb_class != 0
+    if mask.sum() == 0:
+        return 0.5
+    pred_sign = np.sign(pred[mask])
+    true_sign = np.sign(tb_class[mask])
+    return float(np.mean(pred_sign == true_sign))
+
+
 @dataclass
 class MarketState:
     """HMM 市場狀態"""
+
     state: int  # 0=bull, 1=bear, 2=sideways
     state_name: str
     probabilities: np.ndarray  # [p_bull, p_bear, p_sideways]
@@ -32,6 +61,7 @@ class MarketState:
 @dataclass
 class PredictionResult:
     """預測結果"""
+
     predicted_returns: np.ndarray  # 預測報酬率
     predicted_prices: np.ndarray  # 預測收盤價
     confidence_lower: np.ndarray  # 95% CI 下界
@@ -46,6 +76,7 @@ class PredictionResult:
 @dataclass
 class RegimeTransition:
     """行情轉場事件"""
+
     prev_state: str  # "bull", "bear", "sideways"
     curr_state: str
     severity: float  # 0.0 ~ 1.0
@@ -90,7 +121,9 @@ class HMMStateDetector:
         self._state_history: list[str] = []
         self._scale: float = 1.0  # 觀測值縮放因子（改善數值穩定性）
 
-    def fit(self, returns: np.ndarray, volatility: np.ndarray | None = None) -> "HMMStateDetector":
+    def fit(
+        self, returns: np.ndarray, volatility: np.ndarray | None = None
+    ) -> "HMMStateDetector":
         """訓練 HMM
 
         Args:
@@ -116,8 +149,14 @@ class HMMStateDetector:
             vol = np.asarray(volatility).flatten()
 
         valid_mask &= ~np.isnan(vol)
+        valid_mask &= np.isfinite(returns)
+        valid_mask &= np.isfinite(vol)
         returns_clean = returns[valid_mask]
         vol_clean = vol[valid_mask]
+
+        # Clip extreme values to prevent numerical instability
+        returns_clean = np.clip(returns_clean, -0.2, 0.2)
+        vol_clean = np.clip(vol_clean, 0, 0.15)
 
         if len(returns_clean) < 60:
             logger.warning("HMM 訓練資料不足 (%d < 60)，跳過", len(returns_clean))
@@ -143,7 +182,9 @@ class HMMStateDetector:
                 self.is_fitted = True
                 break
             except (ValueError, np.linalg.LinAlgError) as exc:
-                logger.warning("HMM fit failed (covariance_type='%s'): %s", cov_type, exc)
+                logger.warning(
+                    "HMM fit failed (covariance_type='%s'): %s", cov_type, exc
+                )
                 self.model = None
                 self.is_fitted = False
 
@@ -157,7 +198,10 @@ class HMMStateDetector:
         logger.info(
             "HMM 訓練完成: states=%s, means=%s, cov_type=%s",
             self._state_mapping,
-            {k: f"{self.model.means_[k][0] / self._scale:.4f}" for k in range(self.n_states)},
+            {
+                k: f"{self.model.means_[k][0] / self._scale:.4f}"
+                for k in range(self.n_states)
+            },
             self.model.covariance_type,
         )
         return self
@@ -192,9 +236,11 @@ class HMMStateDetector:
         if not self.is_fitted:
             # 未訓練 → 返回預設狀態
             return MarketState(
-                state=2, state_name="sideways",
+                state=2,
+                state_name="sideways",
                 probabilities=np.array([0.33, 0.33, 0.34]),
-                volatility=0.0, mean_return=0.0,
+                volatility=0.0,
+                mean_return=0.0,
             )
 
         returns = np.asarray(returns).flatten()
@@ -206,17 +252,22 @@ class HMMStateDetector:
 
         # 使用最後一個有效的觀測值
         valid_mask = ~(np.isnan(returns) | np.isnan(vol))
+        valid_mask &= np.isfinite(returns) & np.isfinite(vol)
         if not valid_mask.any():
             return MarketState(
-                state=2, state_name="sideways",
+                state=2,
+                state_name="sideways",
                 probabilities=np.array([0.33, 0.33, 0.34]),
-                volatility=0.0, mean_return=0.0,
+                volatility=0.0,
+                mean_return=0.0,
             )
 
-        X = np.column_stack([
-            returns[valid_mask] * self._scale,
-            vol[valid_mask] * self._scale,
-        ])
+        X = np.column_stack(
+            [
+                returns[valid_mask] * self._scale,
+                vol[valid_mask] * self._scale,
+            ]
+        )
 
         # 預測
         state_seq = self.model.predict(X)
@@ -240,7 +291,9 @@ class HMMStateDetector:
         return state_obj
 
     def detect_transition(
-        self, prev_state: str | None = None, curr_state: str | None = None,
+        self,
+        prev_state: str | None = None,
+        curr_state: str | None = None,
     ) -> RegimeTransition | None:
         """偵測行情轉場
 
@@ -267,7 +320,10 @@ class HMMStateDetector:
         transition = RegimeTransition.from_states(prev_state, curr_state)
         logger.info(
             "行情轉場: %s → %s (severity=%.1f, action=%s)",
-            prev_state, curr_state, transition.severity, transition.action,
+            prev_state,
+            curr_state,
+            transition.severity,
+            transition.action,
         )
         return transition
 
@@ -290,9 +346,9 @@ class EnsemblePredictor:
         # HMM 狀態 → 權重調整策略
         # bear 市場時信號強度降低，sideways 時更保守
         self._state_signal_scale = {
-            "bull": 1.0,      # 正常信號
+            "bull": 1.0,  # 正常信號
             "sideways": 0.5,  # 減半信號強度
-            "bear": 0.3,      # 大幅降低信號強度（主要價值：何時不交易）
+            "bear": 0.3,  # 大幅降低信號強度（主要價值：何時不交易）
         }
 
     def fit_hmm(self, returns: np.ndarray, volatility: np.ndarray | None = None):
@@ -306,14 +362,18 @@ class EnsemblePredictor:
         self.hmm.fit(returns, volatility)
 
     def detect_market_state(
-        self, returns: np.ndarray, volatility: np.ndarray | None = None,
+        self,
+        returns: np.ndarray,
+        volatility: np.ndarray | None = None,
     ) -> MarketState:
         """偵測當前市場狀態（需先 fit_hmm）"""
         if self.hmm is None or not self.hmm.is_fitted:
             return MarketState(
-                state=2, state_name="sideways",
+                state=2,
+                state_name="sideways",
                 probabilities=np.array([0.33, 0.33, 0.34]),
-                volatility=0.0, mean_return=0.0,
+                volatility=0.0,
+                mean_return=0.0,
             )
         state = self.hmm.predict_state(returns, volatility)
         self.current_market_state = state
@@ -359,8 +419,7 @@ class EnsemblePredictor:
 
         # 加權平均
         ensemble_returns = (
-            self.lstm_weight * lstm_pred[:n_days]
-            + self.xgb_weight * xgb_pred[:n_days]
+            self.lstm_weight * lstm_pred[:n_days] + self.xgb_weight * xgb_pred[:n_days]
         )
 
         # Bug 8 fix: 幾何複利計算預測價格（非算術 cumsum）
@@ -368,10 +427,9 @@ class EnsemblePredictor:
 
         # Bug 8 fix: Log-space CI（對數常態分佈）
         if lstm_history_error is not None and xgb_history_error is not None:
-            combined_error = (
-                self.lstm_weight * np.std(lstm_history_error)
-                + self.xgb_weight * np.std(xgb_history_error)
-            )
+            combined_error = self.lstm_weight * np.std(
+                lstm_history_error
+            ) + self.xgb_weight * np.std(xgb_history_error)
         else:
             combined_error = 0.02
 
@@ -403,7 +461,9 @@ class EnsemblePredictor:
             # 熊市中的 buy 信號降級為 hold（核心價值：何時不交易）
             if market_state.state_name == "bear" and signal == "buy" and strength < 0.5:
                 signal = "hold"
-                logger.info("HMM: 熊市中 buy 信號強度不足 (%.2f)，降級為 hold", strength)
+                logger.info(
+                    "HMM: 熊市中 buy 信號強度不足 (%.2f)，降級為 hold", strength
+                )
 
         return PredictionResult(
             predicted_returns=ensemble_returns,
@@ -458,8 +518,8 @@ class EnsemblePredictor:
 
         權重 ∝ 1 / MSE（誤差越小權重越大）
         """
-        lstm_mse = np.mean(lstm_errors ** 2) + 1e-8
-        xgb_mse = np.mean(xgb_errors ** 2) + 1e-8
+        lstm_mse = np.mean(lstm_errors**2) + 1e-8
+        xgb_mse = np.mean(xgb_errors**2) + 1e-8
 
         lstm_inv = 1 / lstm_mse
         xgb_inv = 1 / xgb_mse
@@ -483,6 +543,7 @@ class StackingEnsemble:
 
     def __init__(self, alpha: float = 1.0):
         from sklearn.linear_model import Ridge
+
         self.meta_learner = Ridge(alpha=alpha)
         self.is_fitted = False
         self.model_names: list[str] = []
@@ -505,7 +566,9 @@ class StackingEnsemble:
 
         # Log learned weights
         weights = dict(zip(self.model_names, self.meta_learner.coef_))
-        logger.info("Stacking 權重: %s (intercept=%.6f)", weights, self.meta_learner.intercept_)
+        logger.info(
+            "Stacking 權重: %s (intercept=%.6f)", weights, self.meta_learner.intercept_
+        )
 
     def predict(self, model_predictions: dict[str, np.ndarray]) -> np.ndarray:
         """用 meta-learner 預測"""
@@ -544,7 +607,11 @@ class StackingEnsemble:
 
         # 信號生成（簡化版）
         total_return = float(ensemble_returns.sum())
-        threshold = recent_returns_std * 0.5 if recent_returns_std and recent_returns_std > 0 else 0.02
+        threshold = (
+            recent_returns_std * 0.5
+            if recent_returns_std and recent_returns_std > 0
+            else 0.02
+        )
         threshold = max(threshold, 0.005)
 
         if total_return > threshold:
@@ -579,19 +646,24 @@ class StackingEnsemble:
         """儲存 StackingEnsemble"""
         import joblib
         from pathlib import Path
+
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
-        joblib.dump({
-            "meta_learner": self.meta_learner,
-            "model_names": self.model_names,
-            "is_fitted": self.is_fitted,
-        }, path)
+        joblib.dump(
+            {
+                "meta_learner": self.meta_learner,
+                "model_names": self.model_names,
+                "is_fitted": self.is_fitted,
+            },
+            path,
+        )
         logger.info("StackingEnsemble 已儲存至 %s", path)
 
     def load(self, path):
         """載入 StackingEnsemble"""
         import joblib
         from pathlib import Path
+
         path = Path(path)
         if not path.exists():
             logger.warning("StackingEnsemble 檔案不存在: %s", path)

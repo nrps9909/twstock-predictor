@@ -61,8 +61,18 @@ SENTIMENT_LABELS = {
 
 # 已下市/合併股票（存活者偏誤修正用）
 DELISTED_STOCKS: dict[str, dict] = {
-    "2049": {"name": "上銀", "delist_date": "2023-07-27", "reason": "合併下市", "merged_into": "2002"},
-    "3474": {"name": "華亞科", "delist_date": "2016-12-06", "reason": "合併下市", "merged_into": "2408"},
+    "2049": {
+        "name": "上銀",
+        "delist_date": "2023-07-27",
+        "reason": "合併下市",
+        "merged_into": "2002",
+    },
+    "3474": {
+        "name": "華亞科",
+        "delist_date": "2016-12-06",
+        "reason": "合併下市",
+        "merged_into": "2408",
+    },
     "2498": {"name": "宏達電", "delist_date": None, "reason": None},  # placeholder
     # 可持續擴充
 }

@@ -1,6 +1,5 @@
 """Agent 分析 API"""
 
-import asyncio
 from fastapi import APIRouter, HTTPException
 
 from src.utils.constants import STOCK_LIST
@@ -49,13 +48,15 @@ async def agent_analyze(stock_id: str, req: AgentAnalyzeRequest):
     # 轉換
     analyst_reports = []
     for msg in decision.analyst_reports:
-        analyst_reports.append(AnalystReport(
-            role=msg.sender.value,
-            signal=msg.signal.value if msg.signal else None,
-            confidence=msg.confidence,
-            reasoning=msg.reasoning,
-            content=msg.content,
-        ))
+        analyst_reports.append(
+            AnalystReport(
+                role=msg.sender.value,
+                signal=msg.signal.value if msg.signal else None,
+                confidence=msg.confidence,
+                reasoning=msg.reasoning,
+                content=msg.content,
+            )
+        )
 
     researcher = None
     if decision.researcher_report:

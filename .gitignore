@@ -31,6 +31,13 @@ env/
 *.h5
 *.csv
 *.parquet
+models/*.json
+
+# Streamlit (legacy)
+.streamlit/
+
+# Cursor IDE
+.cursor/
 
 # OS
 .DS_Store

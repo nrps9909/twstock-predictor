@@ -1,6 +1,5 @@
 import type { Metadata } from "next";
 import "./globals.css";
-import { TopNav } from "@/components/layout/TopNav";
 import { Providers } from "@/lib/query-client";
 import { Toaster } from "sonner";
 
@@ -24,7 +23,6 @@ export default function RootLayout({
 
         <Providers>
           <div className="relative z-10 flex flex-col min-h-screen">
-            <TopNav />
             <main className="flex-1 overflow-auto">
               {children}
             </main>

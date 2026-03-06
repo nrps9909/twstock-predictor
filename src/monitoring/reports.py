@@ -102,8 +102,12 @@ class ReportGenerator:
         # 1. 累積績效
         lines.append("\n--- 累積績效 ---")
         monthly_pnl = self._get_pnl_summary(month_start, month_end)
-        total_pnl = sum(item.get("pnl_pct", 0) for item in monthly_pnl) if monthly_pnl else 0
-        total_trades = sum(item.get("trades", 0) for item in monthly_pnl) if monthly_pnl else 0
+        total_pnl = (
+            sum(item.get("pnl_pct", 0) for item in monthly_pnl) if monthly_pnl else 0
+        )
+        total_trades = (
+            sum(item.get("trades", 0) for item in monthly_pnl) if monthly_pnl else 0
+        )
         lines.append(f"  月累積損益: {total_pnl:+.2%}")
         lines.append(f"  月交易次數: {total_trades}")
 
@@ -181,21 +185,21 @@ class ReportGenerator:
 
             session = self.session_factory()
             try:
-                stmt = (
-                    select(Prediction)
-                    .where(
-                        Prediction.prediction_date >= start,
-                        Prediction.prediction_date <= end,
-                        Prediction.actual_price.isnot(None),
-                    )
+                stmt = select(Prediction).where(
+                    Prediction.prediction_date >= start,
+                    Prediction.prediction_date <= end,
+                    Prediction.actual_price.isnot(None),
                 )
                 rows = session.execute(stmt).scalars().all()
                 if not rows:
                     return None
 
                 correct = sum(
-                    1 for r in rows
-                    if r.predicted_return and r.actual_price and r.predicted_price
+                    1
+                    for r in rows
+                    if r.predicted_return
+                    and r.actual_price
+                    and r.predicted_price
                     and (r.actual_price > r.predicted_price) == (r.predicted_return > 0)
                 )
                 return correct / len(rows)
@@ -214,7 +218,7 @@ class ReportGenerator:
             return {}
 
         try:
-            from sqlalchemy import select, func
+            from sqlalchemy import select
             from src.db.models import FeatureImportanceRecord
 
             session = self.session_factory()
@@ -250,6 +254,7 @@ class ReportGenerator:
                 for feat in recent:
                     if feat in prev and prev[feat] > 0 and recent[feat] > 0:
                         import math
+
                         r, p = recent[feat], prev[feat]
                         # 簡化 PSI: (r - p) * ln(r / p)
                         psi = (r - p) * math.log(r / p)

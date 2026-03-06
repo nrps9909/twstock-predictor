@@ -120,7 +120,9 @@ class TFTPredictor:
 
         # 分類已知/未知 regressors
         known_reals = ["day_of_week", "month"]
-        unknown_reals = [c for c in feature_cols if c in tft_df.columns and c not in known_reals]
+        unknown_reals = [
+            c for c in feature_cols if c in tft_df.columns and c not in known_reals
+        ]
 
         # TimeSeriesDataSet
         training = TimeSeriesDataSet(
@@ -130,7 +132,8 @@ class TFTPredictor:
             group_ids=["group_id"],
             max_encoder_length=self.max_encoder_length,
             max_prediction_length=self.max_prediction_length,
-            time_varying_known_reals=["time_idx"] + [c for c in known_reals if c in tft_df.columns],
+            time_varying_known_reals=["time_idx"]
+            + [c for c in known_reals if c in tft_df.columns],
             time_varying_unknown_reals=[target_col] + unknown_reals,
             add_relative_time_idx=True,
             add_target_scales=True,
@@ -143,8 +146,12 @@ class TFTPredictor:
             min_prediction_idx=training_cutoff + 1,
         )
 
-        train_loader = training.to_dataloader(train=True, batch_size=batch_size, num_workers=0)
-        val_loader = validation.to_dataloader(train=False, batch_size=batch_size, num_workers=0)
+        train_loader = training.to_dataloader(
+            train=True, batch_size=batch_size, num_workers=0
+        )
+        val_loader = validation.to_dataloader(
+            train=False, batch_size=batch_size, num_workers=0
+        )
 
         # Build TFT
         self.model = TemporalFusionTransformer.from_dataset(
@@ -166,22 +173,29 @@ class TFTPredictor:
             gradient_clip_val=0.1,
             enable_progress_bar=True,
             callbacks=[
-                pl.callbacks.EarlyStopping(
-                    monitor="val_loss", patience=8, mode="min"
-                ),
+                pl.callbacks.EarlyStopping(monitor="val_loss", patience=8, mode="min"),
             ],
         )
-        self.trainer.fit(self.model, train_dataloaders=train_loader, val_dataloaders=val_loader)
+        self.trainer.fit(
+            self.model, train_dataloaders=train_loader, val_dataloaders=val_loader
+        )
 
         # Get metrics
         train_loss = float(self.trainer.callback_metrics.get("train_loss", 0))
         val_loss = float(self.trainer.callback_metrics.get("val_loss", 0))
 
-        logger.info("TFT 訓練完成: train_loss=%.6f, val_loss=%.6f", train_loss, val_loss)
+        logger.info(
+            "TFT 訓練完成: train_loss=%.6f, val_loss=%.6f", train_loss, val_loss
+        )
         return {"train_loss": train_loss, "val_loss": val_loss}
 
-    def predict(self, df: pd.DataFrame, feature_cols: list[str],
-                target_col: str = "return_next_5d", stock_id: str = "default") -> np.ndarray:
+    def predict(
+        self,
+        df: pd.DataFrame,
+        feature_cols: list[str],
+        target_col: str = "return_next_5d",
+        stock_id: str = "default",
+    ) -> np.ndarray:
         """使用訓練好的 TFT 模型預測
 
         Returns:
@@ -200,7 +214,7 @@ class TFTPredictor:
 
         # 只需要最後 max_encoder_length 筆資料
         raw_predictions = self.model.predict(
-            tft_df.iloc[-self.max_encoder_length - self.max_prediction_length:],
+            tft_df.iloc[-self.max_encoder_length - self.max_prediction_length :],
             mode="raw",
             return_x=True,
         )
@@ -240,6 +254,7 @@ class TFTPredictor:
         """載入模型"""
         try:
             from pytorch_forecasting import TemporalFusionTransformer
+
             self.model = TemporalFusionTransformer.load_from_checkpoint(str(path))
             logger.info("TFT 模型已載入自 %s", path)
         except Exception as e:

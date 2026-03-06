@@ -5,7 +5,6 @@ PSI (Population Stability Index) 偵測特徵分佈漂移，
 """
 
 import logging
-from datetime import date
 
 import numpy as np
 import pandas as pd
@@ -16,8 +15,8 @@ logger = logging.getLogger(__name__)
 class FeatureDriftDetector:
     """特徵漂移偵測器"""
 
-    PSI_THRESHOLD_LOW = 0.10    # < 0.10: 穩定
-    PSI_THRESHOLD_HIGH = 0.25   # > 0.25: 顯著漂移
+    PSI_THRESHOLD_LOW = 0.10  # < 0.10: 穩定
+    PSI_THRESHOLD_HIGH = 0.25  # > 0.25: 顯著漂移
 
     def __init__(self, session_factory=None):
         self.session_factory = session_factory
@@ -84,14 +83,18 @@ class FeatureDriftDetector:
         """
         if feature_cols is None:
             feature_cols = [
-                c for c in current_features.columns
+                c
+                for c in current_features.columns
                 if c in historical_features.columns
                 and current_features[c].dtype in [np.float64, np.float32, np.int64]
             ]
 
         drift_scores = {}
         for col in feature_cols:
-            if col not in current_features.columns or col not in historical_features.columns:
+            if (
+                col not in current_features.columns
+                or col not in historical_features.columns
+            ):
                 continue
             psi = self.compute_psi(
                 historical_features[col].values,
@@ -100,12 +103,18 @@ class FeatureDriftDetector:
             drift_scores[col] = psi
 
         # 排序：漂移最嚴重的在前
-        drift_scores = dict(sorted(drift_scores.items(), key=lambda x: x[1], reverse=True))
+        drift_scores = dict(
+            sorted(drift_scores.items(), key=lambda x: x[1], reverse=True)
+        )
 
         drifted = {k: v for k, v in drift_scores.items() if v > self.PSI_THRESHOLD_HIGH}
         if drifted:
-            logger.warning("特徵漂移偵測: %d 個特徵 PSI > %.2f: %s",
-                           len(drifted), self.PSI_THRESHOLD_HIGH, drifted)
+            logger.warning(
+                "特徵漂移偵測: %d 個特徵 PSI > %.2f: %s",
+                len(drifted),
+                self.PSI_THRESHOLD_HIGH,
+                drifted,
+            )
 
         return drift_scores
 

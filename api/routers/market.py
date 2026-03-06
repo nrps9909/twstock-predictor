@@ -2,16 +2,27 @@
 
 import asyncio
 import logging
-from datetime import date
+import math
 
 from fastapi import APIRouter, BackgroundTasks
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 
 from api.services.market_service import run_market_scan, get_market_overview
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/market", tags=["market"])
+
+
+def _sanitize_nan(obj):
+    """Replace NaN/Inf floats with None for JSON serialization."""
+    if isinstance(obj, float) and (math.isnan(obj) or math.isinf(obj)):
+        return None
+    if isinstance(obj, dict):
+        return {k: _sanitize_nan(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_sanitize_nan(v) for v in obj]
+    return obj
 
 
 @router.post("/scan")
@@ -31,41 +42,62 @@ async def scan_market(top_n: int = 40):
 @router.get("/overview")
 async def market_overview():
     """最新掃描結果"""
-    return await get_market_overview()
+    data = await get_market_overview()
+    return JSONResponse(content=_sanitize_nan(data))
 
 
 @router.get("/recommendations")
 async def market_recommendations():
     """買賣推薦"""
     overview = await get_market_overview()
-    return {
+    data = {
         "scan_date": overview.get("scan_date"),
         "buy": overview.get("buy_recommendations", []),
         "sell": overview.get("sell_recommendations", []),
     }
+    return JSONResponse(content=_sanitize_nan(data))
 
 
 @router.get("/intel")
 async def market_intel():
     """市場情報（新聞 + 法人）— 此端點較慢，需抓取 TWSE"""
     from api.services.market_intel_service import get_market_intel
+
     try:
         return await asyncio.wait_for(get_market_intel(), timeout=30)
     except asyncio.TimeoutError:
         logger.warning("Market intel timed out")
         return {
-            "global_news": [], "tw_news": [],
-            "trust_top_buy": [], "trust_top_sell": [],
-            "foreign_top_buy": [], "sync_buy": [],
-            "institutional_total": {"date": "", "foreign": 0, "trust": 0, "dealer": 0, "total": 0},
+            "global_news": [],
+            "tw_news": [],
+            "trust_top_buy": [],
+            "trust_top_sell": [],
+            "foreign_top_buy": [],
+            "sync_buy": [],
+            "institutional_total": {
+                "date": "",
+                "foreign": 0,
+                "trust": 0,
+                "dealer": 0,
+                "total": 0,
+            },
         }
     except Exception as e:
         logger.error("Market intel error: %s", e)
         return {
-            "global_news": [], "tw_news": [],
-            "trust_top_buy": [], "trust_top_sell": [],
-            "foreign_top_buy": [], "sync_buy": [],
-            "institutional_total": {"date": "", "foreign": 0, "trust": 0, "dealer": 0, "total": 0},
+            "global_news": [],
+            "tw_news": [],
+            "trust_top_buy": [],
+            "trust_top_sell": [],
+            "foreign_top_buy": [],
+            "sync_buy": [],
+            "institutional_total": {
+                "date": "",
+                "foreign": 0,
+                "trust": 0,
+                "dealer": 0,
+                "total": 0,
+            },
         }
 
 
@@ -73,6 +105,7 @@ async def market_intel():
 async def institutional_overview():
     """三大法人整體概況（僅抓最新一日，較快）"""
     from src.data.twse_scanner import TWSEScanner
+
     try:
         scanner = TWSEScanner()
         summary = await asyncio.wait_for(
@@ -82,10 +115,26 @@ async def institutional_overview():
         return {"summary": summary}
     except asyncio.TimeoutError:
         logger.warning("Institutional summary timed out")
-        return {"summary": {"date": "", "foreign_total": 0, "trust_total": 0, "dealer_total": 0, "total": 0}}
+        return {
+            "summary": {
+                "date": "",
+                "foreign_total": 0,
+                "trust_total": 0,
+                "dealer_total": 0,
+                "total": 0,
+            }
+        }
     except Exception as e:
         logger.error("Institutional summary error: %s", e)
-        return {"summary": {"date": "", "foreign_total": 0, "trust_total": 0, "dealer_total": 0, "total": 0}}
+        return {
+            "summary": {
+                "date": "",
+                "foreign_total": 0,
+                "trust_total": 0,
+                "dealer_total": 0,
+                "total": 0,
+            }
+        }
 
 
 # ── Pipeline endpoints ─────────────────────────────
@@ -95,6 +144,7 @@ async def institutional_overview():
 async def get_pipeline_batch(stock_ids: str = ""):
     """批次取得 pipeline 結果 (query: stock_ids=2330,2317,...)"""
     from src.db.database import get_pipeline_results_batch
+
     ids = [s.strip() for s in stock_ids.split(",") if s.strip()]
     if not ids:
         return []
@@ -106,6 +156,7 @@ async def get_pipeline_batch(stock_ids: str = ""):
 async def get_pipeline(stock_id: str):
     """取得個股最新 pipeline 分析結果"""
     from src.db.database import get_pipeline_result
+
     result = await asyncio.to_thread(get_pipeline_result, stock_id)
     if not result:
         return {"status": "not_found", "stock_id": stock_id}
@@ -127,8 +178,11 @@ async def trigger_pipeline(stock_id: str, background_tasks: BackgroundTasks):
 @router.post("/analyze/{stock_id}")
 async def analyze_stock(stock_id: str, stock_name: str = ""):
     """統一個股深度分析 (SSE 串流) — 6 階段管線"""
-    logger.info("▶ POST /api/market/analyze/%s (name=%s)", stock_id, stock_name or "auto")
+    logger.info(
+        "▶ POST /api/market/analyze/%s (name=%s)", stock_id, stock_name or "auto"
+    )
     from api.services.stock_analysis_service import analyze_stock as _analyze
+
     return StreamingResponse(
         _analyze(stock_id, stock_name),
         media_type="text/event-stream",
@@ -140,10 +194,30 @@ async def analyze_stock(stock_id: str, stock_name: str = ""):
     )
 
 
+@router.get("/analysis-detail/{stock_id}")
+async def analysis_detail(stock_id: str, date_str: str = ""):
+    """取得個股完整分析結果（合併 MarketScanResult + PipelineResult）"""
+    from datetime import date as _date
+    from src.db.database import get_analysis_detail
+
+    if not date_str:
+        target = _date.today()
+    else:
+        try:
+            target = _date.fromisoformat(date_str)
+        except ValueError:
+            return {"error": "Invalid date format, use YYYY-MM-DD"}
+    result = await asyncio.to_thread(get_analysis_detail, stock_id, target)
+    if not result:
+        return {"status": "not_found", "stock_id": stock_id, "date": str(target)}
+    return result
+
+
 @router.get("/factor-ic")
 async def factor_ic(factor: str = "", window: int = 60):
     """取得因子 IC 資料（滾動 Spearman IC）"""
     from src.db.database import get_factor_ic_rolling
+
     if not factor:
         return {"error": "factor parameter required"}
     result = await asyncio.to_thread(get_factor_ic_rolling, factor, window)

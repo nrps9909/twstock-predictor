@@ -36,6 +36,7 @@ async def run_single_pipeline(stock_id: str, target_date: date | None = None) ->
 
     try:
         from api.services.stock_analysis_service import StockAnalysisService
+
         service = StockAnalysisService()
 
         final_result = None
@@ -45,16 +46,21 @@ async def run_single_pipeline(stock_id: str, target_date: date | None = None) ->
                 if line.startswith("data: "):
                     try:
                         payload = json.loads(line[6:])
-                        if payload.get("phase") == "complete" and payload.get("status") == "done":
+                        if (
+                            payload.get("phase") == "complete"
+                            and payload.get("status") == "done"
+                        ):
                             final_result = payload.get("data", {})
                     except (json.JSONDecodeError, KeyError):
                         pass
 
         if final_result:
-            logger.info("Pipeline completed for %s: signal=%s, score=%.2f",
-                        stock_id,
-                        final_result.get("signal", "N/A"),
-                        final_result.get("total_score", 0))
+            logger.info(
+                "Pipeline completed for %s: signal=%s, score=%.2f",
+                stock_id,
+                final_result.get("signal", "N/A"),
+                final_result.get("total_score", 0),
+            )
             return final_result
 
         logger.warning("Pipeline for %s produced no result", stock_id)
@@ -96,12 +102,18 @@ async def run_daily_pipeline(target_date: date | None = None, top_n: int = 50) -
         return {"total": 0, "completed": 0, "skipped": 0, "failed": 0}
 
     # 2. Filter out already analyzed
-    existing = await asyncio.to_thread(get_pipeline_results_batch, stock_ids, target_date)
+    existing = await asyncio.to_thread(
+        get_pipeline_results_batch, stock_ids, target_date
+    )
     existing_ids = {r["stock_id"] for r in existing}
     todo = [sid for sid in stock_ids if sid not in existing_ids]
 
-    logger.info("Pipeline: %d total, %d already done, %d to process",
-                len(stock_ids), len(existing_ids), len(todo))
+    logger.info(
+        "Pipeline: %d total, %d already done, %d to process",
+        len(stock_ids),
+        len(existing_ids),
+        len(todo),
+    )
 
     # 3. Run unified pipeline for each stock
     completed = 0
@@ -110,13 +122,19 @@ async def run_daily_pipeline(target_date: date | None = None, top_n: int = 50) -
         try:
             await run_single_pipeline(stock_id, target_date)
             completed += 1
-            logger.info("Pipeline completed for %s (%d/%d)", stock_id, completed, len(todo))
+            logger.info(
+                "Pipeline completed for %s (%d/%d)", stock_id, completed, len(todo)
+            )
         except Exception as e:
             logger.error("Pipeline failed for %s: %s", stock_id, e)
             failed += 1
 
-    logger.info("Daily pipeline finished: %d completed, %d failed, %d skipped",
-                completed, failed, len(existing_ids))
+    logger.info(
+        "Daily pipeline finished: %d completed, %d failed, %d skipped",
+        completed,
+        failed,
+        len(existing_ids),
+    )
 
     return {
         "total": len(stock_ids),

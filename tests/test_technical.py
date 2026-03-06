@@ -19,14 +19,16 @@ def sample_data():
     open_ = close + np.random.randn(n) * 0.3
     volume = np.random.randint(1000, 50000, n).astype(float)
 
-    return pd.DataFrame({
-        "date": dates,
-        "open": open_,
-        "high": high,
-        "low": low,
-        "close": close,
-        "volume": volume,
-    })
+    return pd.DataFrame(
+        {
+            "date": dates,
+            "open": open_,
+            "high": high,
+            "low": low,
+            "close": close,
+            "volume": volume,
+        }
+    )
 
 
 class TestTechnicalAnalyzer:
@@ -36,12 +38,22 @@ class TestTechnicalAnalyzer:
     def test_compute_all_adds_columns(self, sample_data):
         result = self.analyzer.compute_all(sample_data)
         expected_cols = [
-            "sma_5", "sma_20", "sma_60",
-            "kd_k", "kd_d", "rsi_14",
-            "macd", "macd_signal", "macd_hist",
-            "bias_5", "bias_10", "bias_20",
-            "bb_upper", "bb_lower",
-            "obv", "adx",
+            "sma_5",
+            "sma_20",
+            "sma_60",
+            "kd_k",
+            "kd_d",
+            "rsi_14",
+            "macd",
+            "macd_signal",
+            "macd_hist",
+            "bias_5",
+            "bias_10",
+            "bias_20",
+            "bb_upper",
+            "bb_lower",
+            "obv",
+            "adx",
         ]
         for col in expected_cols:
             assert col in result.columns, f"Missing column: {col}"
@@ -79,7 +91,13 @@ class TestTechnicalAnalyzer:
         assert "rsi" in signals
         assert "macd" in signals
         assert "summary" in signals
-        assert signals["summary"]["signal"] in ("buy", "sell", "hold", "weak_buy", "weak_sell")
+        assert signals["summary"]["signal"] in (
+            "buy",
+            "sell",
+            "hold",
+            "weak_buy",
+            "weak_sell",
+        )
 
     def test_generate_chart_data(self, sample_data):
         result = self.analyzer.compute_all(sample_data)

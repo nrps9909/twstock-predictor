@@ -18,6 +18,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class BacktestConfig:
     """回測設定"""
+
     initial_capital: float = 1_000_000
     max_positions: int = 5
     commission_rate: float = 0.001425
@@ -106,7 +107,9 @@ class BacktestEngine:
             to_close = self.portfolio.check_stop_loss_take_profit(price_dict)
             for stock_id in to_close:
                 if stock_id in price_dict:
-                    result = self.portfolio.close_position(stock_id, price_dict[stock_id])
+                    result = self.portfolio.close_position(
+                        stock_id, price_dict[stock_id]
+                    )
                     if result:
                         self.trades.append(result)
 
@@ -136,7 +139,9 @@ class BacktestEngine:
                         quantity = int(invest_amount / exec_price / 1000) * 1000
                         if quantity > 0:
                             self.portfolio.open_position(
-                                stock_id, quantity, exec_price,
+                                stock_id,
+                                quantity,
+                                exec_price,
                                 stop_loss=sig.get("stop_loss"),
                                 take_profit=sig.get("take_profit"),
                             )
@@ -154,7 +159,9 @@ class BacktestEngine:
             self.equity_curve.append(portfolio_value)
 
             if len(self.equity_curve) > 1:
-                daily_ret = (self.equity_curve[-1] - self.equity_curve[-2]) / self.equity_curve[-2]
+                daily_ret = (
+                    self.equity_curve[-1] - self.equity_curve[-2]
+                ) / self.equity_curve[-2]
                 self.daily_returns.append(daily_ret)
 
         return self._calculate_metrics()
@@ -188,7 +195,8 @@ class BacktestEngine:
             avg_loss = abs(np.mean([t["pnl_pct"] for t in losses])) if losses else 0
             profit_factor = (
                 sum(t["pnl"] for t in wins) / abs(sum(t["pnl"] for t in losses))
-                if losses and sum(t["pnl"] for t in losses) != 0 else float("inf")
+                if losses and sum(t["pnl"] for t in losses) != 0
+                else float("inf")
             )
         else:
             win_rate = avg_win = avg_loss = 0

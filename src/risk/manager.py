@@ -9,7 +9,7 @@ Kelly criterion 倉位、ATR 停損/追蹤停損、回撤限制、最大回撤�
 """
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import numpy as np
 
@@ -19,6 +19,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class TrailingStopState:
     """ATR Trailing Stop 追蹤狀態"""
+
     entry_price: float
     highest_price: float  # 持倉期間最高價
     atr: float
@@ -145,7 +146,11 @@ class RiskManager:
         self._trailing_stops[stock_id] = state
         logger.info(
             "Trailing Stop 初始化 [%s]: entry=%.2f, stop=%.2f, ATR=%.2f, mult=%.1f",
-            stock_id, entry_price, initial_stop, atr, multiplier,
+            stock_id,
+            entry_price,
+            initial_stop,
+            atr,
+            multiplier,
         )
         return state
 
@@ -177,13 +182,18 @@ class RiskManager:
         if state.current_stop > old_stop:
             logger.info(
                 "Trailing Stop 上移 [%s]: %.2f → %.2f (highest=%.2f)",
-                stock_id, old_stop, state.current_stop, state.highest_price,
+                stock_id,
+                old_stop,
+                state.current_stop,
+                state.highest_price,
             )
 
         if triggered:
             logger.info(
                 "Trailing Stop 觸發 [%s]: stop=%.2f, low=%.2f",
-                stock_id, state.current_stop, current_low,
+                stock_id,
+                state.current_stop,
+                current_low,
             )
 
         return state.current_stop, triggered
@@ -291,24 +301,30 @@ class RiskManager:
         orders = []
         if transition.action == "reduce_50%":
             for stock_id in positions:
-                orders.append({
-                    "stock_id": stock_id,
-                    "action": "reduce",
-                    "reduce_pct": 0.5,
-                    "reason": f"行情轉場 {transition.prev_state}→{transition.curr_state}",
-                })
+                orders.append(
+                    {
+                        "stock_id": stock_id,
+                        "action": "reduce",
+                        "reduce_pct": 0.5,
+                        "reason": f"行情轉場 {transition.prev_state}→{transition.curr_state}",
+                    }
+                )
             logger.warning(
                 "行情轉場減倉: %s→%s, 減倉 50%% (%d 檔)",
-                transition.prev_state, transition.curr_state, len(orders),
+                transition.prev_state,
+                transition.curr_state,
+                len(orders),
             )
         elif transition.action == "close_all":
             for stock_id in positions:
-                orders.append({
-                    "stock_id": stock_id,
-                    "action": "close",
-                    "reduce_pct": 1.0,
-                    "reason": f"行情轉場 {transition.prev_state}→{transition.curr_state}",
-                })
+                orders.append(
+                    {
+                        "stock_id": stock_id,
+                        "action": "close",
+                        "reduce_pct": 1.0,
+                        "reason": f"行情轉場 {transition.prev_state}→{transition.curr_state}",
+                    }
+                )
             logger.warning("行情轉場清倉: %d 檔", len(orders))
 
         return orders
@@ -333,7 +349,10 @@ class RiskManager:
 
         # 2. 最大單一倉位限制
         if position_size_pct > self.max_position_pct:
-            return False, f"倉位超限: {position_size_pct:.0%} > {self.max_position_pct:.0%}"
+            return (
+                False,
+                f"倉位超限: {position_size_pct:.0%} > {self.max_position_pct:.0%}",
+            )
 
         # 3. Trailing Stop 已觸發 → 不可加倉
         ts = self._trailing_stops.get(stock_id)

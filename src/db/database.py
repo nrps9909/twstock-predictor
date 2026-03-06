@@ -1,14 +1,24 @@
 """資料庫連線與 CRUD 操作"""
 
-import json
 from datetime import date, timedelta
 from contextlib import contextmanager
 
 import pandas as pd
 from sqlalchemy import create_engine, select, delete, desc, text
-from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.orm import sessionmaker
 
-from src.db.models import Base, StockPrice, SentimentRecord, Prediction, TradeJournal, MarketScanResult, Alert, PipelineResult, FactorICRecord
+from src.db.models import (
+    Base,
+    StockPrice,
+    SentimentRecord,
+    Prediction,
+    TradeJournal,
+    MarketScanResult,
+    Alert,
+    PipelineResult,
+    FactorICRecord,
+    DataCache,
+)
 from src.utils.config import settings
 
 
@@ -36,9 +46,12 @@ def _migrate_market_scans():
     """Add missing columns to market_scans table (safe, idempotent)."""
     with engine.connect() as conn:
         # Check if table exists first
-        tables = {row[0] for row in conn.execute(text(
-            "SELECT name FROM sqlite_master WHERE type='table'"
-        ))}
+        tables = {
+            row[0]
+            for row in conn.execute(
+                text("SELECT name FROM sqlite_master WHERE type='table'")
+            )
+        }
         if "market_scans" not in tables:
             return
 
@@ -48,9 +61,9 @@ def _migrate_market_scans():
 
         for col_name, col_type in _MARKET_SCAN_MIGRATIONS:
             if col_name not in existing:
-                conn.execute(text(
-                    f"ALTER TABLE market_scans ADD COLUMN {col_name} {col_type}"
-                ))
+                conn.execute(
+                    text(f"ALTER TABLE market_scans ADD COLUMN {col_name} {col_type}")
+                )
         conn.commit()
 
 
@@ -84,40 +97,50 @@ def upsert_stock_prices(df: pd.DataFrame, stock_id: str):
              foreign_buy_sell, trust_buy_sell, dealer_buy_sell,
              margin_balance, short_balance  (後五欄可選)
     """
+    _update_cols = [
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume",
+        "foreign_buy_sell",
+        "trust_buy_sell",
+        "dealer_buy_sell",
+        "margin_balance",
+        "short_balance",
+    ]
     with get_session() as session:
-        for _, row in df.iterrows():
-            existing = session.execute(
-                select(StockPrice).where(
-                    StockPrice.stock_id == stock_id,
-                    StockPrice.date == row["date"],
-                )
-            ).scalar_one_or_none()
+        with session.no_autoflush:
+            for _, row in df.iterrows():
+                existing = session.execute(
+                    select(StockPrice).where(
+                        StockPrice.stock_id == stock_id,
+                        StockPrice.date == row["date"],
+                    )
+                ).scalar_one_or_none()
 
-            if existing:
-                for col in [
-                    "open", "high", "low", "close", "volume",
-                    "foreign_buy_sell", "trust_buy_sell", "dealer_buy_sell",
-                    "margin_balance", "short_balance",
-                ]:
-                    if col in row and pd.notna(row.get(col)):
-                        setattr(existing, col, row[col])
-            else:
-                record = StockPrice(
-                    stock_id=stock_id,
-                    date=row["date"],
-                    open=row.get("open"),
-                    high=row.get("high"),
-                    low=row.get("low"),
-                    close=row.get("close"),
-                    volume=row.get("volume"),
-                    foreign_buy_sell=row.get("foreign_buy_sell"),
-                    trust_buy_sell=row.get("trust_buy_sell"),
-                    dealer_buy_sell=row.get("dealer_buy_sell"),
-                    margin_balance=row.get("margin_balance"),
-                    short_balance=row.get("short_balance"),
-                    as_of_date=row.get("as_of_date", date.today()),
-                )
-                session.add(record)
+                if existing:
+                    for col in _update_cols:
+                        if col in row and pd.notna(row.get(col)):
+                            setattr(existing, col, row[col])
+                else:
+                    session.add(
+                        StockPrice(
+                            stock_id=stock_id,
+                            date=row["date"],
+                            open=row.get("open"),
+                            high=row.get("high"),
+                            low=row.get("low"),
+                            close=row.get("close"),
+                            volume=row.get("volume"),
+                            foreign_buy_sell=row.get("foreign_buy_sell"),
+                            trust_buy_sell=row.get("trust_buy_sell"),
+                            dealer_buy_sell=row.get("dealer_buy_sell"),
+                            margin_balance=row.get("margin_balance"),
+                            short_balance=row.get("short_balance"),
+                            as_of_date=row.get("as_of_date", date.today()),
+                        )
+                    )
 
 
 def get_stock_prices(
@@ -184,7 +207,8 @@ def get_stock_prices_point_in_time(
             stmt = stmt.where(StockPrice.date <= end_date)
         if as_of_date:
             stmt = stmt.where(
-                (StockPrice.as_of_date <= as_of_date) | (StockPrice.as_of_date.is_(None))
+                (StockPrice.as_of_date <= as_of_date)
+                | (StockPrice.as_of_date.is_(None))
             )
         stmt = stmt.order_by(StockPrice.date)
 
@@ -231,9 +255,7 @@ def get_sentiment(
 ) -> pd.DataFrame:
     """讀取情緒紀錄"""
     with get_session() as session:
-        stmt = select(SentimentRecord).where(
-            SentimentRecord.stock_id == stock_id
-        )
+        stmt = select(SentimentRecord).where(SentimentRecord.stock_id == stock_id)
         if start_date:
             stmt = stmt.where(SentimentRecord.date >= start_date)
         if end_date:
@@ -331,58 +353,130 @@ def save_pipeline_result(
     target_date = today + timedelta(days=5)
 
     with get_session() as session:
-        # 1. Write Prediction record
-        pred = Prediction(
-            stock_id=stock_id,
-            prediction_date=today,
-            target_date=target_date,
-            predicted_price=target_price,
-            predicted_return=predicted_change,
-            confidence_lower=target_price * (1 - max(0.02, abs(predicted_change))),
-            confidence_upper=target_price * (1 + max(0.02, abs(predicted_change))),
-            actual_price=None,
-            model_type="pipeline",
-            signal=signal,
+        # 1. Upsert Prediction record
+        existing_pred = session.execute(
+            select(Prediction).where(
+                Prediction.stock_id == stock_id,
+                Prediction.prediction_date == today,
+                Prediction.target_date == target_date,
+                Prediction.model_type == "pipeline",
+            )
+        ).scalar_one_or_none()
+
+        if existing_pred:
+            existing_pred.predicted_price = target_price
+            existing_pred.predicted_return = predicted_change
+            existing_pred.confidence_lower = target_price * (
+                1 - max(0.02, abs(predicted_change))
+            )
+            existing_pred.confidence_upper = target_price * (
+                1 + max(0.02, abs(predicted_change))
+            )
+            existing_pred.signal = signal
+            pred_id = existing_pred.id
+        else:
+            pred = Prediction(
+                stock_id=stock_id,
+                prediction_date=today,
+                target_date=target_date,
+                predicted_price=target_price,
+                predicted_return=predicted_change,
+                confidence_lower=target_price * (1 - max(0.02, abs(predicted_change))),
+                confidence_upper=target_price * (1 + max(0.02, abs(predicted_change))),
+                actual_price=None,
+                model_type="pipeline",
+                signal=signal,
+            )
+            session.add(pred)
+            session.flush()
+            pred_id = pred.id
+
+        # 2. Upsert TradeJournal record
+        analyst_reports = (
+            agent_decision.get("analyst_reports", []) if agent_decision else []
         )
-        session.add(pred)
-        session.flush()  # get pred.id
-        pred_id = pred.id
+        tech_analysis = next(
+            (r for r in analyst_reports if r.get("role") == "technical"), None
+        )
+        sent_analysis = next(
+            (r for r in analyst_reports if r.get("role") == "sentiment"), None
+        )
+        fund_analysis = next(
+            (r for r in analyst_reports if r.get("role") == "fundamental"), None
+        )
+        quant_analysis = next(
+            (r for r in analyst_reports if r.get("role") == "quant"), None
+        )
 
-        # 2. Write TradeJournal record
-        analyst_reports = agent_decision.get("analyst_reports", []) if agent_decision else []
-        # Extract per-role analyses
-        tech_analysis = next((r for r in analyst_reports if r.get("role") == "technical"), None)
-        sent_analysis = next((r for r in analyst_reports if r.get("role") == "sentiment"), None)
-        fund_analysis = next((r for r in analyst_reports if r.get("role") == "fundamental"), None)
-        quant_analysis = next((r for r in analyst_reports if r.get("role") == "quant"), None)
-
-        journal = TradeJournal(
-            stock_id=stock_id,
-            trade_date=today,
-            action=signal,
-            price=current_price,
-            position_size=agent_decision.get("position_size", 0) if agent_decision else 0,
-            technical_analysis=tech_analysis,
-            sentiment_analysis=sent_analysis,
-            fundamental_analysis=fund_analysis,
-            quant_analysis=quant_analysis,
-            researcher_debate=agent_decision.get("researcher") if agent_decision else None,
-            trader_reasoning=reasoning,
-            risk_assessment={
-                "approved": agent_decision.get("approved", False),
-                "risk_notes": agent_decision.get("risk_notes", ""),
-            } if agent_decision else None,
-            market_snapshot={
-                "current_price": current_price,
-                "target_price": target_price,
-                "confidence": confidence,
-                "technical": technical_data,
-                "sentiment": {k: v for k, v in (sentiment_data or {}).items()
-                              if k not in ("news_headlines", "global_context")},
-                "prediction": prediction_data,
+        snapshot = {
+            "current_price": current_price,
+            "target_price": target_price,
+            "confidence": confidence,
+            "technical": technical_data,
+            "sentiment": {
+                k: v
+                for k, v in (sentiment_data or {}).items()
+                if k not in ("news_headlines", "global_context")
             },
-        )
-        session.add(journal)
+            "prediction": prediction_data,
+        }
+
+        existing_journal = session.execute(
+            select(TradeJournal).where(
+                TradeJournal.stock_id == stock_id,
+                TradeJournal.trade_date == today,
+            )
+        ).scalar_one_or_none()
+
+        if existing_journal:
+            existing_journal.action = signal
+            existing_journal.price = current_price
+            existing_journal.position_size = (
+                agent_decision.get("position_size", 0) if agent_decision else 0
+            )
+            existing_journal.technical_analysis = tech_analysis
+            existing_journal.sentiment_analysis = sent_analysis
+            existing_journal.fundamental_analysis = fund_analysis
+            existing_journal.quant_analysis = quant_analysis
+            existing_journal.researcher_debate = (
+                agent_decision.get("researcher") if agent_decision else None
+            )
+            existing_journal.trader_reasoning = reasoning
+            existing_journal.risk_assessment = (
+                {
+                    "approved": agent_decision.get("approved", False),
+                    "risk_notes": agent_decision.get("risk_notes", ""),
+                }
+                if agent_decision
+                else None
+            )
+            existing_journal.market_snapshot = snapshot
+        else:
+            journal = TradeJournal(
+                stock_id=stock_id,
+                trade_date=today,
+                action=signal,
+                price=current_price,
+                position_size=agent_decision.get("position_size", 0)
+                if agent_decision
+                else 0,
+                technical_analysis=tech_analysis,
+                sentiment_analysis=sent_analysis,
+                fundamental_analysis=fund_analysis,
+                quant_analysis=quant_analysis,
+                researcher_debate=agent_decision.get("researcher")
+                if agent_decision
+                else None,
+                trader_reasoning=reasoning,
+                risk_assessment={
+                    "approved": agent_decision.get("approved", False),
+                    "risk_notes": agent_decision.get("risk_notes", ""),
+                }
+                if agent_decision
+                else None,
+                market_snapshot=snapshot,
+            )
+            session.add(journal)
 
     return pred_id
 
@@ -400,7 +494,9 @@ def get_prediction_history(
         stmt = select(Prediction).where(Prediction.model_type == "pipeline")
         if stock_id:
             stmt = stmt.where(Prediction.stock_id == stock_id)
-        stmt = stmt.order_by(desc(Prediction.prediction_date)).limit(limit)
+        stmt = stmt.order_by(
+            desc(Prediction.prediction_date), desc(Prediction.id)
+        ).limit(limit)
 
         predictions = session.execute(stmt).scalars().all()
         if not predictions:
@@ -409,31 +505,40 @@ def get_prediction_history(
         results = []
         for p in predictions:
             # Find matching journal entry
-            j_stmt = select(TradeJournal).where(
-                TradeJournal.stock_id == p.stock_id,
-                TradeJournal.trade_date == p.prediction_date,
-            ).limit(1)
+            j_stmt = (
+                select(TradeJournal)
+                .where(
+                    TradeJournal.stock_id == p.stock_id,
+                    TradeJournal.trade_date == p.prediction_date,
+                )
+                .limit(1)
+            )
             journal = session.execute(j_stmt).scalar_one_or_none()
 
             from src.utils.constants import STOCK_LIST
-            results.append({
-                "id": p.id,
-                "stock_id": p.stock_id,
-                "stock_name": STOCK_LIST.get(p.stock_id, p.stock_id),
-                "prediction_date": str(p.prediction_date),
-                "signal": p.signal,
-                "confidence": float(p.confidence_upper - p.predicted_price) / p.predicted_price
-                    if p.predicted_price and p.confidence_upper else 0,
-                "predicted_price": p.predicted_price,
-                "actual_price": p.actual_price,
-                "reasoning": journal.trader_reasoning if journal else "",
-                "agent_action": journal.action if journal else p.signal,
-                "agent_approved": journal.risk_assessment.get("approved", False)
-                    if journal and journal.risk_assessment else False,
-                "analyst_reports": journal.technical_analysis
-                    if journal else None,
-                "market_snapshot": journal.market_snapshot if journal else None,
-            })
+
+            results.append(
+                {
+                    "id": p.id,
+                    "stock_id": p.stock_id,
+                    "stock_name": STOCK_LIST.get(p.stock_id, p.stock_id),
+                    "prediction_date": str(p.prediction_date),
+                    "signal": p.signal,
+                    "confidence": float(p.confidence_upper - p.predicted_price)
+                    / p.predicted_price
+                    if p.predicted_price and p.confidence_upper
+                    else 0,
+                    "predicted_price": p.predicted_price,
+                    "actual_price": p.actual_price,
+                    "reasoning": journal.trader_reasoning if journal else "",
+                    "agent_action": journal.action if journal else p.signal,
+                    "agent_approved": journal.risk_assessment.get("approved", False)
+                    if journal and journal.risk_assessment
+                    else False,
+                    "analyst_reports": journal.technical_analysis if journal else None,
+                    "market_snapshot": journal.market_snapshot if journal else None,
+                }
+            )
 
         return results
 
@@ -458,10 +563,15 @@ def update_prediction_actuals(stock_id: str) -> int:
 
         for p in preds:
             # Get actual price on target_date (or closest prior)
-            price_stmt = select(StockPrice).where(
-                StockPrice.stock_id == stock_id,
-                StockPrice.date <= p.target_date,
-            ).order_by(desc(StockPrice.date)).limit(1)
+            price_stmt = (
+                select(StockPrice)
+                .where(
+                    StockPrice.stock_id == stock_id,
+                    StockPrice.date <= p.target_date,
+                )
+                .order_by(desc(StockPrice.date))
+                .limit(1)
+            )
 
             price_row = session.execute(price_stmt).scalar_one_or_none()
             if price_row and price_row.close:
@@ -474,18 +584,34 @@ def update_prediction_actuals(stock_id: str) -> int:
 # ── Market Scan ─────────────────────────────────────────
 
 
-def save_market_scan(results: list[dict]):
-    """批次寫入市場掃描結果（同一天的結果會覆蓋）"""
+def save_market_scan(results: list[dict], *, full_replace: bool = False):
+    """批次寫入市場掃描結果（同一天同股票會覆蓋）
+
+    Args:
+        results: list of scan result dicts
+        full_replace: if True, delete ALL records for the scan_date first
+                      (used by batch scan). Default False = upsert per stock.
+    """
     if not results:
         return
 
     scan_date = results[0].get("scan_date", date.today())
 
     with get_session() as session:
-        # Delete existing results for this scan_date
-        session.execute(
-            delete(MarketScanResult).where(MarketScanResult.scan_date == scan_date)
-        )
+        if full_replace:
+            # Batch scan: replace all records for the date
+            session.execute(
+                delete(MarketScanResult).where(MarketScanResult.scan_date == scan_date)
+            )
+        else:
+            # Single/partial: only delete records for stocks being saved
+            stock_ids = [r["stock_id"] for r in results]
+            session.execute(
+                delete(MarketScanResult).where(
+                    MarketScanResult.scan_date == scan_date,
+                    MarketScanResult.stock_id.in_(stock_ids),
+                )
+            )
         session.flush()
 
         for rec in results:
@@ -500,17 +626,21 @@ def get_latest_market_scan() -> list[dict]:
     """
     with get_session() as session:
         # Find the latest scan_date
-        latest_stmt = select(MarketScanResult.scan_date).order_by(
-            desc(MarketScanResult.scan_date)
-        ).limit(1)
+        latest_stmt = (
+            select(MarketScanResult.scan_date)
+            .order_by(desc(MarketScanResult.scan_date))
+            .limit(1)
+        )
         latest_date = session.execute(latest_stmt).scalar_one_or_none()
 
         if not latest_date:
             return []
 
-        stmt = select(MarketScanResult).where(
-            MarketScanResult.scan_date == latest_date
-        ).order_by(MarketScanResult.ranking)
+        stmt = (
+            select(MarketScanResult)
+            .where(MarketScanResult.scan_date == latest_date)
+            .order_by(MarketScanResult.ranking)
+        )
 
         rows = session.execute(stmt).scalars().all()
         return [
@@ -561,23 +691,31 @@ def get_all_stocks_latest_prices(stock_ids: list[str]) -> pd.DataFrame:
     with get_session() as session:
         records = []
         for sid in stock_ids:
-            stmt = select(StockPrice).where(
-                StockPrice.stock_id == sid
-            ).order_by(desc(StockPrice.date)).limit(2)
+            stmt = (
+                select(StockPrice)
+                .where(StockPrice.stock_id == sid)
+                .order_by(desc(StockPrice.date))
+                .limit(2)
+            )
             rows = session.execute(stmt).scalars().all()
 
             if rows:
                 latest = rows[0]
                 prev = rows[1] if len(rows) > 1 else rows[0]
-                pct = ((latest.close - prev.close) / prev.close * 100
-                       if prev.close and latest.close else 0)
-                records.append({
-                    "stock_id": sid,
-                    "close": latest.close,
-                    "prev_close": prev.close,
-                    "price_change_pct": round(pct, 2),
-                    "latest_date": latest.date,
-                })
+                pct = (
+                    (latest.close - prev.close) / prev.close * 100
+                    if prev.close and latest.close
+                    else 0
+                )
+                records.append(
+                    {
+                        "stock_id": sid,
+                        "close": latest.close,
+                        "prev_close": prev.close,
+                        "price_change_pct": round(pct, 2),
+                        "latest_date": latest.date,
+                    }
+                )
 
         return pd.DataFrame(records) if records else pd.DataFrame()
 
@@ -643,6 +781,7 @@ def get_unread_alert_count() -> int:
     """取得未讀警報數量"""
     with get_session() as session:
         from sqlalchemy import func
+
         stmt = select(func.count(Alert.id)).where(Alert.is_read == 0)
         return session.execute(stmt).scalar() or 0
 
@@ -659,9 +798,8 @@ def mark_all_alerts_read():
     """標記所有警報已讀"""
     with get_session() as session:
         from sqlalchemy import update
-        session.execute(
-            update(Alert).where(Alert.is_read == 0).values(is_read=1)
-        )
+
+        session.execute(update(Alert).where(Alert.is_read == 0).values(is_read=1))
 
 
 def get_top_institutional_stocks(top_n: int = 50) -> list[str]:
@@ -671,10 +809,13 @@ def get_top_institutional_stocks(top_n: int = 50) -> list[str]:
         list of stock_id strings
     """
     with get_session() as session:
-        from sqlalchemy import func, case
-        latest_stmt = select(MarketScanResult.scan_date).order_by(
-            desc(MarketScanResult.scan_date)
-        ).limit(1)
+        from sqlalchemy import func
+
+        latest_stmt = (
+            select(MarketScanResult.scan_date)
+            .order_by(desc(MarketScanResult.scan_date))
+            .limit(1)
+        )
         latest_date = session.execute(latest_stmt).scalar_one_or_none()
         if not latest_date:
             return []
@@ -706,17 +847,18 @@ def get_previous_market_scan(before_date: date) -> list[dict]:
     """
     with get_session() as session:
         # Find the latest scan_date before the given date
-        latest_stmt = select(MarketScanResult.scan_date).where(
-            MarketScanResult.scan_date < before_date
-        ).order_by(desc(MarketScanResult.scan_date)).limit(1)
+        latest_stmt = (
+            select(MarketScanResult.scan_date)
+            .where(MarketScanResult.scan_date < before_date)
+            .order_by(desc(MarketScanResult.scan_date))
+            .limit(1)
+        )
         latest_date = session.execute(latest_stmt).scalar_one_or_none()
 
         if not latest_date:
             return []
 
-        stmt = select(MarketScanResult).where(
-            MarketScanResult.scan_date == latest_date
-        )
+        stmt = select(MarketScanResult).where(MarketScanResult.scan_date == latest_date)
         rows = session.execute(stmt).scalars().all()
         return [
             {
@@ -749,29 +891,38 @@ def save_pipeline_result_record(result: dict):
 
         if existing:
             for key in [
-                "signal", "confidence", "predicted_price", "reasoning",
-                "agent_scores", "sentiment_summary", "news_summary",
-                "technical_data", "institutional_data", "risk_approved",
+                "signal",
+                "confidence",
+                "predicted_price",
+                "reasoning",
+                "agent_scores",
+                "sentiment_summary",
+                "news_summary",
+                "technical_data",
+                "institutional_data",
+                "risk_approved",
                 "pipeline_version",
             ]:
                 if key in result:
                     setattr(existing, key, result[key])
         else:
-            session.add(PipelineResult(
-                stock_id=stock_id,
-                analysis_date=analysis_date,
-                signal=result.get("signal"),
-                confidence=result.get("confidence"),
-                predicted_price=result.get("predicted_price"),
-                reasoning=result.get("reasoning"),
-                agent_scores=result.get("agent_scores"),
-                sentiment_summary=result.get("sentiment_summary"),
-                news_summary=result.get("news_summary"),
-                technical_data=result.get("technical_data"),
-                institutional_data=result.get("institutional_data"),
-                risk_approved=result.get("risk_approved"),
-                pipeline_version=result.get("pipeline_version", "2.0"),
-            ))
+            session.add(
+                PipelineResult(
+                    stock_id=stock_id,
+                    analysis_date=analysis_date,
+                    signal=result.get("signal"),
+                    confidence=result.get("confidence"),
+                    predicted_price=result.get("predicted_price"),
+                    reasoning=result.get("reasoning"),
+                    agent_scores=result.get("agent_scores"),
+                    sentiment_summary=result.get("sentiment_summary"),
+                    news_summary=result.get("news_summary"),
+                    technical_data=result.get("technical_data"),
+                    institutional_data=result.get("institutional_data"),
+                    risk_approved=result.get("risk_approved"),
+                    pipeline_version=result.get("pipeline_version", "2.0"),
+                )
+            )
 
 
 def get_pipeline_result(stock_id: str, target_date: date | None = None) -> dict | None:
@@ -798,13 +949,17 @@ def get_pipeline_result(stock_id: str, target_date: date | None = None) -> dict 
             "news_summary": row.news_summary,
             "technical_data": row.technical_data,
             "institutional_data": row.institutional_data,
-            "risk_approved": bool(row.risk_approved) if row.risk_approved is not None else None,
+            "risk_approved": bool(row.risk_approved)
+            if row.risk_approved is not None
+            else None,
             "pipeline_version": row.pipeline_version,
             "created_at": row.created_at.isoformat() if row.created_at else None,
         }
 
 
-def get_pipeline_results_batch(stock_ids: list[str], target_date: date | None = None) -> list[dict]:
+def get_pipeline_results_batch(
+    stock_ids: list[str], target_date: date | None = None
+) -> list[dict]:
     """批次取得多支股票的 pipeline 結果"""
     results = []
     for sid in stock_ids:
@@ -812,6 +967,132 @@ def get_pipeline_results_batch(stock_ids: list[str], target_date: date | None = 
         if r:
             results.append(r)
     return results
+
+
+def get_analysis_detail(stock_id: str, analysis_date: date) -> dict | None:
+    """取得完整分析結果（合併 MarketScanResult + PipelineResult）→ AnalysisResult 格式"""
+    from src.utils.constants import STOCK_LIST
+    import json as _json
+
+    with get_session() as session:
+        # 1. MarketScanResult (has factor_details, confidence breakdown)
+        scan = session.execute(
+            select(MarketScanResult).where(
+                MarketScanResult.stock_id == stock_id,
+                MarketScanResult.scan_date == analysis_date,
+            )
+        ).scalar_one_or_none()
+
+        # 2. PipelineResult (has narrative in sentiment_summary, risk_approved)
+        pipeline = session.execute(
+            select(PipelineResult).where(
+                PipelineResult.stock_id == stock_id,
+                PipelineResult.analysis_date == analysis_date,
+            )
+        ).scalar_one_or_none()
+
+        if not scan and not pipeline:
+            return None
+
+        # Build AnalysisResult-like dict
+        stock_name = STOCK_LIST.get(stock_id, stock_id)
+
+        # Parse narrative from pipeline.sentiment_summary (stored as JSON string)
+        narrative = {}
+        if pipeline and pipeline.sentiment_summary:
+            try:
+                narrative = _json.loads(pipeline.sentiment_summary)
+            except (ValueError, TypeError):
+                narrative = {}
+
+        # Factor details from MarketScanResult, fallback to PipelineResult.technical_data
+        factor_details = {}
+        if scan and scan.factor_details:
+            factor_details = scan.factor_details
+        elif pipeline and pipeline.technical_data:
+            # Reconstruct factor_details from technical_data scores
+            td = (
+                pipeline.technical_data
+                if isinstance(pipeline.technical_data, dict)
+                else {}
+            )
+            factor_details = {
+                k: {"score": v, "available": v is not None}
+                for k, v in td.items()
+                if v is not None
+            }
+
+        # Confidence breakdown
+        confidence_breakdown = {}
+        if scan:
+            confidence_breakdown = {
+                "confidence_agreement": scan.confidence_agreement or 0,
+                "confidence_strength": scan.confidence_strength or 0,
+                "confidence_coverage": scan.confidence_coverage or 0,
+                "confidence_freshness": scan.confidence_freshness or 0,
+                "risk_discount": scan.risk_discount or 1.0,
+            }
+
+        # Risk decision
+        risk_approved = True
+        if pipeline and pipeline.risk_approved is not None:
+            risk_approved = bool(pipeline.risk_approved)
+
+        # Find TradeJournal for risk details
+        journal = session.execute(
+            select(TradeJournal)
+            .where(
+                TradeJournal.stock_id == stock_id,
+                TradeJournal.trade_date == analysis_date,
+            )
+            .limit(1)
+        ).scalar_one_or_none()
+
+        risk_decision = {
+            "action": (scan.signal if scan else pipeline.signal)
+            if (scan or pipeline)
+            else "hold",
+            "position_size": 0,
+            "approved": risk_approved,
+            "risk_notes": [],
+            "stop_loss": None,
+            "take_profit": None,
+        }
+        if journal and journal.risk_assessment:
+            ra = journal.risk_assessment
+            risk_decision["approved"] = ra.get("approved", risk_approved)
+            notes = ra.get("risk_notes", "")
+            risk_decision["risk_notes"] = (
+                notes.split("; ") if isinstance(notes, str) and notes else []
+            )
+
+        signal = scan.signal if scan else (pipeline.signal if pipeline else "hold")
+        confidence = (
+            scan.confidence if scan else (pipeline.confidence if pipeline else 0)
+        )
+        total_score = scan.total_score if scan else 0.5
+        current_price = scan.current_price if scan else 0
+        price_change_pct = scan.price_change_pct if scan else 0
+        reasoning = scan.reasoning if scan else (pipeline.reasoning if pipeline else "")
+        regime = scan.market_regime if scan else "sideways"
+
+        return {
+            "stock_id": stock_id,
+            "stock_name": stock_name,
+            "current_price": current_price or 0,
+            "price_change_pct": price_change_pct or 0,
+            "total_score": total_score or 0.5,
+            "signal": signal or "hold",
+            "confidence": confidence or 0,
+            "confidence_breakdown": confidence_breakdown,
+            "factor_details": factor_details,
+            "regime": regime or "sideways",
+            "reasoning": reasoning or "",
+            "narrative": narrative,
+            "risk_decision": risk_decision,
+            "analysis_date": str(analysis_date),
+            "pipeline_version": pipeline.pipeline_version if pipeline else "3.0",
+        }
 
 
 # ── Factor IC Tracking ────────────────────────────────
@@ -843,7 +1124,7 @@ def backfill_forward_returns(lookback_days: int = 5):
     fill in forward_return_5d and forward_return_20d from StockPrice.
     """
     today = date.today()
-    cutoff_5d = today - timedelta(days=lookback_days + 3)   # buffer for non-trading days
+    cutoff_5d = today - timedelta(days=lookback_days + 3)  # buffer for non-trading days
     cutoff_20d = today - timedelta(days=25 + 3)
 
     with get_session() as session:
@@ -857,10 +1138,13 @@ def backfill_forward_returns(lookback_days: int = 5):
         for rec in records:
             # Get the close price on record_date
             base_price_row = session.execute(
-                select(StockPrice).where(
+                select(StockPrice)
+                .where(
                     StockPrice.stock_id == rec.stock_id,
                     StockPrice.date <= rec.record_date,
-                ).order_by(desc(StockPrice.date)).limit(1)
+                )
+                .order_by(desc(StockPrice.date))
+                .limit(1)
             ).scalar_one_or_none()
 
             if not base_price_row or not base_price_row.close:
@@ -869,15 +1153,20 @@ def backfill_forward_returns(lookback_days: int = 5):
             # Get close ~5 trading days later
             future_date = rec.record_date + timedelta(days=lookback_days + 3)
             future_row = session.execute(
-                select(StockPrice).where(
+                select(StockPrice)
+                .where(
                     StockPrice.stock_id == rec.stock_id,
                     StockPrice.date > rec.record_date,
                     StockPrice.date <= future_date,
-                ).order_by(desc(StockPrice.date)).limit(1)
+                )
+                .order_by(desc(StockPrice.date))
+                .limit(1)
             ).scalar_one_or_none()
 
             if future_row and future_row.close:
-                rec.forward_return_5d = (future_row.close - base_price_row.close) / base_price_row.close
+                rec.forward_return_5d = (
+                    future_row.close - base_price_row.close
+                ) / base_price_row.close
 
         # Fill 20-day forward returns
         stmt_20d = select(FactorICRecord).where(
@@ -888,10 +1177,13 @@ def backfill_forward_returns(lookback_days: int = 5):
 
         for rec in records_20d:
             base_price_row = session.execute(
-                select(StockPrice).where(
+                select(StockPrice)
+                .where(
                     StockPrice.stock_id == rec.stock_id,
                     StockPrice.date <= rec.record_date,
-                ).order_by(desc(StockPrice.date)).limit(1)
+                )
+                .order_by(desc(StockPrice.date))
+                .limit(1)
             ).scalar_one_or_none()
 
             if not base_price_row or not base_price_row.close:
@@ -899,15 +1191,20 @@ def backfill_forward_returns(lookback_days: int = 5):
 
             future_date = rec.record_date + timedelta(days=30)
             future_row = session.execute(
-                select(StockPrice).where(
+                select(StockPrice)
+                .where(
                     StockPrice.stock_id == rec.stock_id,
                     StockPrice.date > rec.record_date,
                     StockPrice.date <= future_date,
-                ).order_by(desc(StockPrice.date)).limit(1)
+                )
+                .order_by(desc(StockPrice.date))
+                .limit(1)
             ).scalar_one_or_none()
 
             if future_row and future_row.close:
-                rec.forward_return_20d = (future_row.close - base_price_row.close) / base_price_row.close
+                rec.forward_return_20d = (
+                    future_row.close - base_price_row.close
+                ) / base_price_row.close
 
 
 def get_factor_ic_rolling(factor_name: str, window: int = 60) -> dict:
@@ -923,14 +1220,24 @@ def get_factor_ic_rolling(factor_name: str, window: int = 60) -> dict:
     from scipy import stats
 
     with get_session() as session:
-        stmt = select(FactorICRecord).where(
-            FactorICRecord.factor_name == factor_name,
-            FactorICRecord.forward_return_5d.isnot(None),
-        ).order_by(FactorICRecord.record_date)
+        stmt = (
+            select(FactorICRecord)
+            .where(
+                FactorICRecord.factor_name == factor_name,
+                FactorICRecord.forward_return_5d.isnot(None),
+            )
+            .order_by(FactorICRecord.record_date)
+        )
 
         rows = session.execute(stmt).scalars().all()
         if not rows:
-            return {"factor": factor_name, "ic_mean": 0, "ic_std": 0, "icir": 0, "ic_series": []}
+            return {
+                "factor": factor_name,
+                "ic_mean": 0,
+                "ic_std": 0,
+                "icir": 0,
+                "ic_series": [],
+            }
 
         # Group by date
         date_groups: dict[date, list[tuple[float, float]]] = {}
@@ -954,13 +1261,23 @@ def get_factor_ic_rolling(factor_name: str, window: int = 60) -> dict:
                 ic_series.append({"date": str(d), "ic": round(corr, 4)})
 
         if not ic_series:
-            return {"factor": factor_name, "ic_mean": 0, "ic_std": 0, "icir": 0, "ic_series": []}
+            return {
+                "factor": factor_name,
+                "ic_mean": 0,
+                "ic_std": 0,
+                "icir": 0,
+                "ic_series": [],
+            }
 
         # Rolling stats over the window
         recent = ic_series[-window:]
         ics = [x["ic"] for x in recent]
         ic_mean = sum(ics) / len(ics) if ics else 0
-        ic_std = (sum((x - ic_mean) ** 2 for x in ics) / len(ics)) ** 0.5 if len(ics) > 1 else 0
+        ic_std = (
+            (sum((x - ic_mean) ** 2 for x in ics) / len(ics)) ** 0.5
+            if len(ics) > 1
+            else 0
+        )
         icir = ic_mean / ic_std if ic_std > 0 else 0
 
         return {
@@ -970,3 +1287,104 @@ def get_factor_ic_rolling(factor_name: str, window: int = 60) -> dict:
             "icir": round(icir, 4),
             "ic_series": ic_series,
         }
+
+
+def get_all_factor_ic_summary(min_samples: int = 30) -> dict[str, dict]:
+    """Batch query IC summary for all factors (last 60 days).
+
+    Returns:
+        {factor_name: {"ic_mean": float, "ic_std": float, "icir": float, "n_dates": int}}
+    """
+    from scipy import stats as sp_stats
+
+    cutoff = date.today() - timedelta(days=90)
+    with get_session() as session:
+        stmt = (
+            select(FactorICRecord)
+            .where(
+                FactorICRecord.record_date >= cutoff,
+                FactorICRecord.forward_return_5d.isnot(None),
+            )
+            .order_by(FactorICRecord.record_date)
+        )
+
+        rows = session.execute(stmt).scalars().all()
+        if not rows:
+            return {}
+
+        # Group by factor_name → date → [(score, return)]
+        factor_dates: dict[str, dict[date, list[tuple[float, float]]]] = {}
+        for r in rows:
+            fd = factor_dates.setdefault(r.factor_name, {})
+            fd.setdefault(r.record_date, []).append(
+                (r.factor_score, r.forward_return_5d)
+            )
+
+        result = {}
+        for factor_name, date_groups in factor_dates.items():
+            ic_values = []
+            for d, pairs in sorted(date_groups.items()):
+                if len(pairs) < 5:
+                    continue
+                scores = [p[0] for p in pairs]
+                returns = [p[1] for p in pairs]
+                corr, _ = sp_stats.spearmanr(scores, returns)
+                if not pd.isna(corr):
+                    ic_values.append(corr)
+
+            if len(ic_values) < min_samples:
+                continue
+
+            recent = ic_values[-60:]
+            ic_mean = sum(recent) / len(recent)
+            ic_std = (
+                (sum((x - ic_mean) ** 2 for x in recent) / len(recent)) ** 0.5
+                if len(recent) > 1
+                else 0
+            )
+            icir = ic_mean / ic_std if ic_std > 0 else 0
+
+            result[factor_name] = {
+                "ic_mean": round(ic_mean, 4),
+                "ic_std": round(ic_std, 4),
+                "icir": round(icir, 4),
+                "n_dates": len(ic_values),
+            }
+
+        return result
+
+
+# ── Data Cache (generic API response cache) ─────────────
+
+
+def upsert_data_cache(cache_key: str, cache_date: date, data_json: str):
+    """Write JSON data to generic cache (upsert by key + date)"""
+    with get_session() as session:
+        existing = session.execute(
+            select(DataCache).where(
+                DataCache.cache_key == cache_key,
+                DataCache.cache_date == cache_date,
+            )
+        ).scalar_one_or_none()
+        if existing:
+            existing.data_json = data_json
+        else:
+            session.add(
+                DataCache(
+                    cache_key=cache_key,
+                    cache_date=cache_date,
+                    data_json=data_json,
+                )
+            )
+
+
+def get_data_cache(cache_key: str, cache_date: date) -> str | None:
+    """Read JSON data from generic cache. Returns None if not found."""
+    with get_session() as session:
+        row = session.execute(
+            select(DataCache).where(
+                DataCache.cache_key == cache_key,
+                DataCache.cache_date == cache_date,
+            )
+        ).scalar_one_or_none()
+        return row.data_json if row else None

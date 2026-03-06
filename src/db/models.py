@@ -12,14 +12,13 @@ Tables:
 - FactorICRecord: 因子 IC 追蹤紀錄
 """
 
-from datetime import date, datetime
+from datetime import datetime
 
 from sqlalchemy import (
     Column,
     Date,
     DateTime,
     Float,
-    Index,
     Integer,
     String,
     Text,
@@ -61,9 +60,7 @@ class StockPrice(Base):
 
     created_at = Column(DateTime, default=datetime.utcnow)
 
-    __table_args__ = (
-        UniqueConstraint("stock_id", "date", name="uix_stock_date"),
-    )
+    __table_args__ = (UniqueConstraint("stock_id", "date", name="uix_stock_date"),)
 
 
 class SentimentRecord(Base):
@@ -81,6 +78,7 @@ class SentimentRecord(Base):
     sentiment_score = Column(Float)  # -1.0 ~ 1.0
     keywords = Column(Text)  # JSON array
     engagement = Column(Integer, default=0)  # 互動數（推文數/回覆數）
+    credibility = Column(Float, default=0.5)  # LLM-assessed source credibility 0.0~1.0
     url = Column(Text)
 
     # As-of 時間戳（Point-in-time correctness）
@@ -110,7 +108,10 @@ class Prediction(Base):
 
     __table_args__ = (
         UniqueConstraint(
-            "stock_id", "prediction_date", "target_date", "model_type",
+            "stock_id",
+            "prediction_date",
+            "target_date",
+            "model_type",
             name="uix_prediction",
         ),
     )
@@ -126,7 +127,9 @@ class BacktestResult(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     stock_id = Column(String(10), nullable=False, index=True)
-    strategy_name = Column(String(50), nullable=False)  # e.g. "lstm_ensemble", "tft_agent"
+    strategy_name = Column(
+        String(50), nullable=False
+    )  # e.g. "lstm_ensemble", "tft_agent"
     start_date = Column(Date, nullable=False)
     end_date = Column(Date, nullable=False)
 
@@ -192,7 +195,10 @@ class FeatureImportanceRecord(Base):
 
     __table_args__ = (
         UniqueConstraint(
-            "stock_id", "run_date", "feature_name", "method",
+            "stock_id",
+            "run_date",
+            "feature_name",
+            "method",
             name="uix_feature_importance",
         ),
     )
@@ -276,6 +282,26 @@ class Alert(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
+class DataCache(Base):
+    """Generic data cache for API responses (FinMind, yfinance, TWSE, etc.)
+
+    Stores JSON-serialized data keyed by cache_key + cache_date.
+    Eliminates redundant API calls across server restarts.
+    """
+
+    __tablename__ = "data_cache"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    cache_key = Column(String(100), nullable=False, index=True)
+    cache_date = Column(Date, nullable=False, index=True)
+    data_json = Column(Text)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("cache_key", "cache_date", name="uix_cache_key_date"),
+    )
+
+
 class FactorICRecord(Base):
     """因子 IC 追蹤紀錄 — 存每日因子分數 + 遠期報酬，計算因子有效性"""
 
@@ -286,14 +312,15 @@ class FactorICRecord(Base):
     stock_id = Column(String(10), nullable=False, index=True)
     factor_name = Column(String(30), nullable=False)
     factor_score = Column(Float, nullable=False)
-    forward_return_5d = Column(Float)   # 5 交易日後回填
+    forward_return_5d = Column(Float)  # 5 交易日後回填
     forward_return_20d = Column(Float)  # 20 交易日後回填
 
     created_at = Column(DateTime, default=datetime.utcnow)
 
     __table_args__ = (
-        UniqueConstraint("record_date", "stock_id", "factor_name",
-                         name="uix_factor_ic_record"),
+        UniqueConstraint(
+            "record_date", "stock_id", "factor_name", name="uix_factor_ic_record"
+        ),
     )
 
 
@@ -338,7 +365,9 @@ class MarketScanResult(Base):
     reasoning = Column(Text)
 
     # Score transparency
-    score_coverage = Column(JSON, nullable=True)  # {"technical": true, "ml": false, ...}
+    score_coverage = Column(
+        JSON, nullable=True
+    )  # {"technical": true, "ml": false, ...}
     effective_coverage = Column(Float, nullable=True)  # 0.0~1.0
 
     # Confidence breakdown
@@ -367,17 +396,17 @@ class PipelineResult(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     stock_id = Column(String(10), nullable=False, index=True)
     analysis_date = Column(Date, nullable=False, index=True)
-    signal = Column(String(20))           # buy/sell/hold
+    signal = Column(String(20))  # buy/sell/hold
     confidence = Column(Float)
     predicted_price = Column(Float)
-    reasoning = Column(Text)              # Agent 決策理由
-    agent_scores = Column(JSON)           # 各 agent 分數
-    sentiment_summary = Column(Text)      # 情緒摘要
-    news_summary = Column(Text)           # 新聞摘要
-    technical_data = Column(JSON)         # K 線 + 技術指標
-    institutional_data = Column(JSON)     # 法人買賣超
-    risk_approved = Column(Integer)       # 風控通過
-    pipeline_version = Column(String(20)) # 追蹤版本
+    reasoning = Column(Text)  # Agent 決策理由
+    agent_scores = Column(JSON)  # 各 agent 分數
+    sentiment_summary = Column(Text)  # 情緒摘要
+    news_summary = Column(Text)  # 新聞摘要
+    technical_data = Column(JSON)  # K 線 + 技術指標
+    institutional_data = Column(JSON)  # 法人買賣超
+    risk_approved = Column(Integer)  # 風控通過
+    pipeline_version = Column(String(20))  # 追蹤版本
     created_at = Column(DateTime, default=datetime.utcnow)
 
     __table_args__ = (

@@ -84,7 +84,7 @@ export function TechnicalTab({ technicalData }: TechnicalTabProps) {
           </div>
           <CandlestickChart
             data={candleData}
-            height={380}
+            height={420}
             overlays={
               overlays.sma_5.length > 0 || overlays.sma_20.length > 0
                 ? overlays
@@ -94,7 +94,7 @@ export function TechnicalTab({ technicalData }: TechnicalTabProps) {
         </div>
       )}
 
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
         {/* Technical indicators chart */}
         {chartData.length > 0 && (
           <div className="glass-card p-5">
@@ -120,11 +120,11 @@ export function TechnicalTab({ technicalData }: TechnicalTabProps) {
             <RadarChart data={radarData} height={220} />
           </div>
         )}
-      </div>
 
-      {/* Signal details */}
-      <div className="glass-card p-5">
-        <TechnicalSnapshot signals={signals} indicators={indicators} />
+        {/* Signal details */}
+        <div className="glass-card p-5">
+          <TechnicalSnapshot signals={signals} indicators={indicators} />
+        </div>
       </div>
     </div>
   );

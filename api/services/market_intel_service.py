@@ -1,17 +1,22 @@
 """市場情報聚合服務 — 新聞 + 法人動向"""
 
 import asyncio
+import json
 import logging
-from datetime import date, timedelta
+from datetime import date
 
 from src.data.twse_scanner import TWSEScanner
 from src.data.sentiment_crawler import SentimentCrawler
+from src.db.database import upsert_data_cache, get_data_cache
 
 logger = logging.getLogger(__name__)
 
+# In-memory daily cache for market intel (avoid repeated TWSE calls)
+_intel_cache: dict = {"date": None, "data": None}
+
 
 async def get_market_intel() -> dict:
-    """聚合市場情報
+    """聚合市場情報 — DB-first + in-memory daily cache
 
     Returns:
         dict with:
@@ -22,13 +27,33 @@ async def get_market_intel() -> dict:
         - sync_buy: 外資+投信同步買超
         - institutional_total: 三大法人整體買賣超
     """
+    today = date.today()
+
+    # In-memory cache (within same process lifetime)
+    if _intel_cache["date"] == today and _intel_cache["data"] is not None:
+        return _intel_cache["data"]
+
+    # DB-first: institutional data (TWSE T86) changes once daily
+    cache_key = "market_intel"
+    cached_json = get_data_cache(cache_key, today)
+    if cached_json:
+        try:
+            data = json.loads(cached_json)
+            _intel_cache["date"] = today
+            _intel_cache["data"] = data
+            logger.info("Market intel loaded from DB cache")
+            return data
+        except (json.JSONDecodeError, TypeError):
+            pass
+
     scanner = TWSEScanner()
 
     # Fetch institutional data and news in parallel
     async def _get_trust_top_buy():
         try:
             return await asyncio.to_thread(
-                scanner.get_trust_top_stocks, days=5, top_n=15)
+                scanner.get_trust_top_stocks, days=5, top_n=15
+            )
         except Exception as e:
             logger.error("Failed to get trust top buy: %s", e)
             return []
@@ -36,7 +61,8 @@ async def get_market_intel() -> dict:
     async def _get_trust_top_sell():
         try:
             return await asyncio.to_thread(
-                scanner.get_trust_top_sellers, days=5, top_n=15)
+                scanner.get_trust_top_sellers, days=5, top_n=15
+            )
         except Exception as e:
             logger.error("Failed to get trust top sell: %s", e)
             return []
@@ -52,8 +78,7 @@ async def get_market_intel() -> dict:
         try:
             crawler = SentimentCrawler()
             # Get global news via Google RSS
-            global_news = await asyncio.to_thread(
-                crawler.crawl_global_context, "台股")
+            global_news = await asyncio.to_thread(crawler.crawl_global_context, "台股")
             return global_news
         except Exception as e:
             logger.error("Failed to get news: %s", e)
@@ -63,12 +88,19 @@ async def get_market_intel() -> dict:
         """Get full institutional data for sync_buy and foreign ranking"""
         try:
             return await asyncio.to_thread(
-                scanner.get_trust_top_stocks, days=5, top_n=50)
+                scanner.get_trust_top_stocks, days=5, top_n=50
+            )
         except Exception as e:
             logger.error("Failed to get full institutional data: %s", e)
             return []
 
-    trust_top_buy, trust_top_sell, summary, global_news, trust_data = await asyncio.gather(
+    (
+        trust_top_buy,
+        trust_top_sell,
+        summary,
+        global_news,
+        trust_data,
+    ) = await asyncio.gather(
         _get_trust_top_buy(),
         _get_trust_top_sell(),
         _get_institutional_summary(),
@@ -78,29 +110,36 @@ async def get_market_intel() -> dict:
 
     # Sync buy: both foreign and trust positive
     sync_buy = [
-        s for s in trust_data
+        s
+        for s in trust_data
         if s.get("trust_cumulative", 0) > 0 and s.get("foreign_cumulative", 0) > 0
     ]
-    sync_buy.sort(key=lambda x: x.get("trust_cumulative", 0) + x.get("foreign_cumulative", 0),
-                  reverse=True)
+    sync_buy.sort(
+        key=lambda x: x.get("trust_cumulative", 0) + x.get("foreign_cumulative", 0),
+        reverse=True,
+    )
 
     # Foreign top buy
-    foreign_top_buy = sorted(trust_data, key=lambda x: x.get("foreign_cumulative", 0), reverse=True)[:15]
+    foreign_top_buy = sorted(
+        trust_data, key=lambda x: x.get("foreign_cumulative", 0), reverse=True
+    )[:15]
 
     # Format news
     formatted_news = []
     for item in global_news[:20]:
         if isinstance(item, dict):
-            formatted_news.append({
-                "title": item.get("title", ""),
-                "source": item.get("source", ""),
-                "date": item.get("date", ""),
-                "url": item.get("url", ""),
-            })
+            formatted_news.append(
+                {
+                    "title": item.get("title", ""),
+                    "source": item.get("source", ""),
+                    "date": item.get("date", ""),
+                    "url": item.get("url", ""),
+                }
+            )
         elif isinstance(item, str):
             formatted_news.append({"title": item, "source": "", "date": "", "url": ""})
 
-    return {
+    result = {
         "global_news": formatted_news,
         "tw_news": [],  # Can be populated from Yahoo TW separately
         "trust_top_buy": [
@@ -108,7 +147,7 @@ async def get_market_intel() -> dict:
                 "stock_id": s["stock_id"],
                 "stock_name": s.get("stock_name", s["stock_id"]),
                 "net_buy": s.get("trust_cumulative", 0),
-                "consecutive_days": s.get("trust_consecutive_days", 0),
+                "consecutive_days": abs(s.get("trust_consecutive_days", 0)),
                 "foreign_net": s.get("foreign_cumulative", 0),
             }
             for s in trust_top_buy
@@ -118,7 +157,7 @@ async def get_market_intel() -> dict:
                 "stock_id": s["stock_id"],
                 "stock_name": s.get("stock_name", s["stock_id"]),
                 "net_sell": abs(s.get("trust_cumulative", 0)),
-                "consecutive_days": s.get("trust_consecutive_days", 0),
+                "consecutive_days": abs(s.get("trust_consecutive_days", 0)),
                 "foreign_net": s.get("foreign_cumulative", 0),
             }
             for s in trust_top_sell
@@ -149,3 +188,13 @@ async def get_market_intel() -> dict:
             "total": summary.get("total", 0),
         },
     }
+
+    # Persist to DB + in-memory cache
+    _intel_cache["date"] = today
+    _intel_cache["data"] = result
+    try:
+        upsert_data_cache(cache_key, today, json.dumps(result))
+    except Exception as e:
+        logger.warning("Failed to save market_intel cache to DB: %s", e)
+
+    return result

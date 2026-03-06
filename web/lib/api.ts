@@ -77,6 +77,9 @@ export const api = {
   triggerPipeline: (stockId: string) =>
     fetchJSON<{ status: string; stock_id: string }>(`/api/market/pipeline/${stockId}`, { method: "POST" }),
 
+  getAnalysisDetail: (stockId: string, date: string) =>
+    fetchJSON<AnalysisResult | { status: string }>(`/api/market/analysis-detail/${stockId}?date_str=${date}`),
+
   getFactorIC: (factor: string, window = 60) =>
     fetchJSON<FactorICData>(`/api/market/factor-ic?factor=${factor}&window=${window}`),
 

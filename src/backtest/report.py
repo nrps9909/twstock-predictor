@@ -5,8 +5,6 @@
 
 import logging
 
-import numpy as np
-
 logger = logging.getLogger(__name__)
 
 
@@ -36,7 +34,7 @@ def generate_report(backtest_result: dict) -> str:
         report_lines.append("\n月報酬率:")
         for i, ret in enumerate(monthly):
             bar = "+" * int(abs(ret) * 200) if ret > 0 else "-" * int(abs(ret) * 200)
-            report_lines.append(f"  月{i+1:2d}: {ret:+.2%} {bar}")
+            report_lines.append(f"  月{i + 1:2d}: {ret:+.2%} {bar}")
 
     return "\n".join(report_lines)
 
@@ -51,6 +49,7 @@ def generate_comparison_report(result_a: dict, result_b: dict) -> str:
     Returns:
         格式化的比較文字報告
     """
+
     def _fmt(val, fmt=".2%"):
         if val is None:
             return "N/A"
@@ -77,47 +76,8 @@ def generate_comparison_report(result_a: dict, result_b: dict) -> str:
     sa = result_a.get("sharpe_ratio", 0) or 0
     sb = result_b.get("sharpe_ratio", 0) or 0
     diff = sb - sa
-    lines.append(f"Sharpe 改善: {diff:+.2f} ({'B 優' if diff > 0 else 'A 優' if diff < 0 else '持平'})")
+    lines.append(
+        f"Sharpe 改善: {diff:+.2f} ({'B 優' if diff > 0 else 'A 優' if diff < 0 else '持平'})"
+    )
 
     return "\n".join(lines)
-
-
-def generate_plotly_report(backtest_result: dict) -> dict:
-    """生成 Plotly 圖表數據（供 Streamlit 使用）
-
-    Returns:
-        dict with chart data ready for plotly
-    """
-    equity = backtest_result.get("equity_curve", [])
-    trades = backtest_result.get("trades", [])
-
-    charts = {}
-
-    # 1. 權益曲線
-    if equity:
-        charts["equity_curve"] = {
-            "x": list(range(len(equity))),
-            "y": equity,
-            "title": "權益曲線",
-        }
-
-    # 2. 回撤曲線
-    if equity:
-        arr = np.array(equity)
-        peak = np.maximum.accumulate(arr)
-        dd = (arr - peak) / peak
-        charts["drawdown"] = {
-            "x": list(range(len(dd))),
-            "y": dd.tolist(),
-            "title": "回撤曲線",
-        }
-
-    # 3. 交易 PnL 分佈
-    if trades:
-        pnls = [t["pnl_pct"] for t in trades]
-        charts["pnl_distribution"] = {
-            "values": pnls,
-            "title": "交易 PnL 分佈",
-        }
-
-    return charts

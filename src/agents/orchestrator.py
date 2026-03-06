@@ -17,12 +17,11 @@
 
 import asyncio
 import logging
-from datetime import date
 
-import numpy as np
 
 from src.agents.base import (
-    AgentMessage, AgentRole, MarketContext, Signal, TradeDecision,
+    MarketContext,
+    TradeDecision,
 )
 from src.agents.memory import ShortTermMemory
 from src.risk.manager import RiskManager
@@ -58,7 +57,9 @@ class AgentOrchestrator:
         self._pending_reduce_orders: list[dict] = []
 
     @staticmethod
-    def _emit(queue: asyncio.Queue | None, substep: str, data: dict | None = None) -> None:
+    def _emit(
+        queue: asyncio.Queue | None, substep: str, data: dict | None = None
+    ) -> None:
         """非阻塞發送進度事件到 queue"""
         if queue is not None:
             try:
@@ -97,19 +98,29 @@ class AgentOrchestrator:
 
         # 0.5 行情轉場檢查
         self._pending_reduce_orders = []
-        if market_state and self._previous_market_state and market_state != self._previous_market_state:
+        if (
+            market_state
+            and self._previous_market_state
+            and market_state != self._previous_market_state
+        ):
             from src.models.ensemble import RegimeTransition
-            transition = RegimeTransition.from_states(self._previous_market_state, market_state)
+
+            transition = RegimeTransition.from_states(
+                self._previous_market_state, market_state
+            )
             if transition.severity > 0.5:
                 reduce_orders = self.risk_manager.regime_transition_check(
-                    transition, self._positions,
+                    transition,
+                    self._positions,
                 )
                 if reduce_orders:
                     self._pending_reduce_orders = reduce_orders
                     logger.warning(
                         "行情轉場 %s→%s (severity=%.1f), 減倉 %d 檔",
-                        self._previous_market_state, market_state,
-                        transition.severity, len(reduce_orders),
+                        self._previous_market_state,
+                        market_state,
+                        transition.severity,
+                        len(reduce_orders),
                     )
         self._previous_market_state = market_state
 
@@ -117,21 +128,28 @@ class AgentOrchestrator:
         self._emit(progress_queue, "pipeline_start")
         try:
             from api.services.stock_analysis_service import StockAnalysisService
+
             service = StockAnalysisService()
 
             # Collect the final result from SSE stream
             final_result = None
             async for event_str in service.analyze_stock(context.stock_id):
                 import json
+
                 try:
                     # Parse SSE data line
                     for line in event_str.strip().split("\n"):
                         if line.startswith("data: "):
                             payload = json.loads(line[6:])
-                            if payload.get("status") == "done" and payload.get("phase") == "complete":
+                            if (
+                                payload.get("status") == "done"
+                                and payload.get("phase") == "complete"
+                            ):
                                 final_result = payload.get("data", {})
                             # Forward progress
-                            self._emit(progress_queue, payload.get("phase", ""), payload)
+                            self._emit(
+                                progress_queue, payload.get("phase", ""), payload
+                            )
                 except (json.JSONDecodeError, KeyError):
                     pass
 
@@ -149,7 +167,7 @@ class AgentOrchestrator:
                         if order.get("stock_id") == context.stock_id:
                             action = "sell"
                             position_size = order.get("reduce_pct", 0.5) * position_size
-                            reasoning += f" | 行情轉場強制減倉"
+                            reasoning += " | 行情轉場強制減倉"
                             break
 
                 decision = TradeDecision(

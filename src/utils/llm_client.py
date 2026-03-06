@@ -52,11 +52,16 @@ def _call_cli_sync(
     """透過 claude -p CLI 呼叫（每次呼叫直接嘗試，不預設閘門）"""
     # prompt 作為命令行參數（不用 stdin）
     cmd = [
-        _CLAUDE_PATH, "-p",
-        "--output-format", "json",
-        "--max-turns", "1",
-        "--model", model,
-        "--system-prompt", system_prompt,
+        _CLAUDE_PATH,
+        "-p",
+        "--output-format",
+        "json",
+        "--max-turns",
+        "1",
+        "--model",
+        model,
+        "--system-prompt",
+        system_prompt,
         prompt,
     ]
     env = _clean_env()
@@ -96,6 +101,7 @@ def _call_cli_sync(
 
 # ── Public API ─────────────────────────────────────────
 
+
 async def call_claude(
     prompt: str,
     model: str = "claude-haiku-4-5-20251001",
@@ -107,7 +113,11 @@ async def call_claude(
     預設 timeout 60s（CLI 冷啟動約需 20-40s）。
     """
     return await asyncio.to_thread(
-        _call_cli_sync, prompt, model, timeout, system_prompt,
+        _call_cli_sync,
+        prompt,
+        model,
+        timeout,
+        system_prompt,
     )
 
 

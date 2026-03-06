@@ -5,16 +5,19 @@ import json
 import logging
 from datetime import date, timedelta
 from typing import AsyncGenerator
-from pathlib import Path
 
-import numpy as np
 import pandas as pd
 
 from src.utils.constants import STOCK_LIST
 from src.utils.config import settings
 from src.db.database import (
-    get_stock_prices, upsert_stock_prices, get_sentiment,
-    insert_sentiment, save_pipeline_result,
+    get_stock_prices,
+    upsert_stock_prices,
+    get_sentiment,
+    insert_sentiment,
+    save_pipeline_result,
+    upsert_data_cache,
+    get_data_cache,
 )
 from src.data.stock_fetcher import StockFetcher
 from src.data.sentiment_crawler import SentimentCrawler
@@ -28,7 +31,9 @@ logger = logging.getLogger(__name__)
 MODEL_DIR = settings.PROJECT_ROOT / "models"
 
 
-def _event(step: str, status: str, progress: int, message: str = "", data: dict | None = None) -> str:
+def _event(
+    step: str, status: str, progress: int, message: str = "", data: dict | None = None
+) -> str:
     """格式化 SSE 事件"""
     payload = {
         "step": step,
@@ -67,8 +72,8 @@ def _build_fundamental_summary(df: pd.DataFrame) -> dict:
                 days = len(values)
                 # Determine trend direction
                 if len(values) >= 2:
-                    recent_half = values.iloc[len(values)//2:].sum()
-                    older_half = values.iloc[:len(values)//2].sum()
+                    recent_half = values.iloc[len(values) // 2 :].sum()
+                    older_half = values.iloc[: len(values) // 2].sum()
                     if recent_half > older_half:
                         trend = "加速買超" if total > 0 else "減緩賣超"
                     else:
@@ -92,7 +97,9 @@ def _build_fundamental_summary(df: pd.DataFrame) -> dict:
                 prev = df.iloc[-6]
                 if pd.notna(prev.get(col)):
                     change = val - float(prev[col])
-                    pct = change / float(prev[col]) * 100 if float(prev[col]) != 0 else 0
+                    pct = (
+                        change / float(prev[col]) * 100 if float(prev[col]) != 0 else 0
+                    )
                     summary[f"{label}_5日變化"] = f"{change:+,.0f} 張 ({pct:+.1f}%)"
 
     # 外資連續買賣超天數
@@ -102,7 +109,9 @@ def _build_fundamental_summary(df: pd.DataFrame) -> dict:
             consecutive = 0
             direction = "買超" if fbs.iloc[-1] > 0 else "賣超"
             for val in reversed(fbs.values):
-                if (val > 0 and direction == "買超") or (val < 0 and direction == "賣超"):
+                if (val > 0 and direction == "買超") or (
+                    val < 0 and direction == "賣超"
+                ):
                     consecutive += 1
                 else:
                     break
@@ -160,9 +169,13 @@ async def run_pipeline(
         else:
             data_fresh = False
 
-    yield _event("check_data", "done", 10,
-                 f"資料 {data_count} 筆" + (f"，最新 {latest_date}" if latest_date else ""),
-                 {"count": data_count, "latest_date": str(latest_date), "fresh": data_fresh})
+    yield _event(
+        "check_data",
+        "done",
+        10,
+        f"資料 {data_count} 筆" + (f"，最新 {latest_date}" if latest_date else ""),
+        {"count": data_count, "latest_date": str(latest_date), "fresh": data_fresh},
+    )
 
     # ── Step 2: FETCH_DATA ────────────────────────────────
     if not data_fresh:
@@ -172,14 +185,21 @@ async def run_pipeline(
             fetcher = StockFetcher()
             fetch_start = (today - timedelta(days=400)).isoformat()
             new_df = await asyncio.to_thread(
-                fetcher.fetch_all, stock_id, fetch_start, end_str,
+                fetcher.fetch_all,
+                stock_id,
+                fetch_start,
+                end_str,
             )
             if not new_df.empty:
                 await asyncio.to_thread(upsert_stock_prices, new_df, stock_id)
                 data_count = len(new_df)
-                yield _event("fetch_data", "done", 20,
-                             f"抓取 {len(new_df)} 筆資料完成",
-                             {"rows": len(new_df)})
+                yield _event(
+                    "fetch_data",
+                    "done",
+                    20,
+                    f"抓取 {len(new_df)} 筆資料完成",
+                    {"rows": len(new_df)},
+                )
             else:
                 yield _event("fetch_data", "done", 20, "無新資料（使用既有資料）")
         except Exception as e:
@@ -206,7 +226,15 @@ async def run_pipeline(
 
         # 提取關鍵指標
         indicators = {}
-        for col in ["rsi_14", "kd_k", "kd_d", "macd_hist", "bias_10", "adx", "bb_pband"]:
+        for col in [
+            "rsi_14",
+            "kd_k",
+            "kd_d",
+            "macd_hist",
+            "bias_10",
+            "adx",
+            "bb_pband",
+        ]:
             if col in latest_row.index:
                 val = latest_row[col]
                 indicators[col] = None if (val != val) else round(float(val), 2)
@@ -216,9 +244,13 @@ async def run_pipeline(
             "indicators": indicators,
             "current_price": current_price,
         }
-        yield _event("technical", "done", 35,
-                     f"技術訊號: {technical_signals.get('summary', {}).get('signal', 'N/A')}",
-                     technical_data)
+        yield _event(
+            "technical",
+            "done",
+            35,
+            f"技術訊號: {technical_signals.get('summary', {}).get('signal', 'N/A')}",
+            technical_data,
+        )
     except Exception as e:
         logger.error("技術分析失敗: %s", e)
         yield _event("technical", "error", 35, f"技術分析失敗: {e}")
@@ -233,8 +265,10 @@ async def run_pipeline(
     try:
         # Check DB for recent sentiment data
         sent_df = await asyncio.to_thread(
-            get_sentiment, stock_id,
-            today - timedelta(days=30), today,
+            get_sentiment,
+            stock_id,
+            today - timedelta(days=30),
+            today,
         )
 
         # Check freshness — auto-crawl if stale or empty
@@ -255,24 +289,51 @@ async def run_pipeline(
                     # Prepare for DB insert
                     for art in articles:
                         if "sentiment_score" not in art:
-                            score_map = {"bullish": 0.5, "bearish": -0.5, "neutral": 0.0}
+                            score_map = {
+                                "bullish": 0.5,
+                                "bearish": -0.5,
+                                "neutral": 0.0,
+                            }
                             art["sentiment_score"] = score_map.get(
-                                art.get("sentiment_label", "neutral"), 0.0)
+                                art.get("sentiment_label", "neutral"), 0.0
+                            )
                     await asyncio.to_thread(insert_sentiment, articles)
-                    yield _event("sentiment", "running", 43,
-                                 f"爬取 {len(articles)} 篇情緒資料")
+                    yield _event(
+                        "sentiment", "running", 43, f"爬取 {len(articles)} 篇情緒資料"
+                    )
 
-                # Crawl global context (separate, doesn't go to DB)
-                global_context = await asyncio.to_thread(
-                    crawler.crawl_global_context, stock_id)
+                # Crawl global context — DB-first (4hr cache)
+                global_context = []
+                _gc_cache_key = f"global_news:{stock_id}"
+                _gc_cached = get_data_cache(_gc_cache_key, today)
+                if _gc_cached:
+                    try:
+                        global_context = json.loads(_gc_cached)
+                    except Exception:
+                        global_context = []
+                if not global_context:
+                    global_context = await asyncio.to_thread(
+                        crawler.crawl_global_context, stock_id
+                    )
+                    if global_context:
+                        try:
+                            upsert_data_cache(
+                                _gc_cache_key,
+                                today,
+                                json.dumps(global_context, ensure_ascii=False),
+                            )
+                        except Exception:
+                            pass
 
                 # Extract news headlines from crawled articles
                 news_headlines = [a["title"] for a in articles if a.get("title")]
 
                 # Re-query DB for fresh data
                 sent_df = await asyncio.to_thread(
-                    get_sentiment, stock_id,
-                    today - timedelta(days=30), today,
+                    get_sentiment,
+                    stock_id,
+                    today - timedelta(days=30),
+                    today,
                 )
             except Exception as crawl_err:
                 logger.warning("情緒爬取失敗（使用既有資料）: %s", crawl_err)
@@ -294,20 +355,42 @@ async def run_pipeline(
                 "news_headlines": news_headlines[:15],
                 "global_context": global_context[:15],
             }
-            label = "偏多" if avg_score > 0.1 else ("偏空" if avg_score < -0.1 else "中性")
-            yield _event("sentiment", "done", 45, f"情緒 {label} ({avg_score:+.2f}, {total} 篇)", sentiment_data)
+            label = (
+                "偏多" if avg_score > 0.1 else ("偏空" if avg_score < -0.1 else "中性")
+            )
+            yield _event(
+                "sentiment",
+                "done",
+                45,
+                f"情緒 {label} ({avg_score:+.2f}, {total} 篇)",
+                sentiment_data,
+            )
         else:
             sentiment_data = {
-                "total": 0, "avg_score": 0, "bullish_ratio": 0, "bearish_ratio": 0,
+                "total": 0,
+                "avg_score": 0,
+                "bullish_ratio": 0,
+                "bearish_ratio": 0,
                 "news_headlines": news_headlines[:15],
                 "global_context": global_context[:15],
             }
-            yield _event("sentiment", "done", 45,
-                         "無個股情緒資料（將使用全球 context）" if global_context else "無情緒資料",
-                         sentiment_data)
+            yield _event(
+                "sentiment",
+                "done",
+                45,
+                "無個股情緒資料（將使用全球 context）"
+                if global_context
+                else "無情緒資料",
+                sentiment_data,
+            )
     except Exception as e:
         logger.error("情緒載入失敗: %s", e)
-        sentiment_data = {"total": 0, "avg_score": 0, "news_headlines": [], "global_context": []}
+        sentiment_data = {
+            "total": 0,
+            "avg_score": 0,
+            "news_headlines": [],
+            "global_context": [],
+        }
         yield _event("sentiment", "error", 45, f"情緒載入失敗: {e}")
 
     # ── Step 5: CHECK_MODEL ───────────────────────────────
@@ -317,9 +400,13 @@ async def run_pipeline(
     xgb_exists = (MODEL_DIR / f"{stock_id}_xgb.json").exists()
     model_exists = lstm_exists and xgb_exists and not force_retrain
 
-    yield _event("check_model", "done", 55,
-                 "模型已就緒" if model_exists else "需要訓練模型",
-                 {"exists": model_exists, "lstm": lstm_exists, "xgb": xgb_exists})
+    yield _event(
+        "check_model",
+        "done",
+        55,
+        "模型已就緒" if model_exists else "需要訓練模型",
+        {"exists": model_exists, "lstm": lstm_exists, "xgb": xgb_exists},
+    )
 
     # ── Step 6: TRAIN_MODEL ───────────────────────────────
     trainer = ModelTrainer(stock_id)
@@ -335,12 +422,24 @@ async def run_pipeline(
                 epochs=epochs,
                 use_triple_barrier=True,
             )
-            yield _event("train_model", "done", 70, "模型訓練完成",
-                         {"lstm": train_result.get("lstm"), "xgboost": train_result.get("xgboost")})
+            yield _event(
+                "train_model",
+                "done",
+                70,
+                "模型訓練完成",
+                {
+                    "lstm": train_result.get("lstm"),
+                    "xgboost": train_result.get("xgboost"),
+                },
+            )
         except Exception as e:
             logger.error("訓練失敗: %s", e)
-            yield _event("train_model", "error", 70,
-                         f"訓練失敗: {e}（將跳過 ML 預測，僅用 Agent 分析）")
+            yield _event(
+                "train_model",
+                "error",
+                70,
+                f"訓練失敗: {e}（將跳過 ML 預測，僅用 Agent 分析）",
+            )
             model_exists = False  # Mark so predict step is skipped
     else:
         yield _event("train_model", "skipped", 70, "使用既有模型")
@@ -348,12 +447,16 @@ async def run_pipeline(
             await asyncio.to_thread(trainer.load_models)
         except Exception as e:
             logger.error("載入模型失敗: %s", e)
-            yield _event("train_model", "error", 70,
-                         f"載入模型失敗: {e}（將跳過 ML 預測，僅用 Agent 分析）")
+            yield _event(
+                "train_model",
+                "error",
+                70,
+                f"載入模型失敗: {e}（將跳過 ML 預測，僅用 Agent 分析）",
+            )
 
     # ── Step 7: PREDICT ───────────────────────────────────
     # Check if trainer has loaded models (training or loading succeeded)
-    _has_models = hasattr(trainer, 'lstm_model') and trainer.lstm_model is not None
+    _has_models = hasattr(trainer, "lstm_model") and trainer.lstm_model is not None
 
     if _has_models:
         yield _event("predict", "running", 75, "執行預測...")
@@ -378,7 +481,9 @@ async def run_pipeline(
 
                 pred_data = {
                     "signal": prediction_result.signal,
-                    "signal_strength": round(float(prediction_result.signal_strength), 3),
+                    "signal_strength": round(
+                        float(prediction_result.signal_strength), 3
+                    ),
                     "predicted_returns": prediction_result.predicted_returns.tolist(),
                     "predicted_prices": prediction_result.predicted_prices.tolist(),
                     "confidence_lower": prediction_result.confidence_lower.tolist(),
@@ -387,9 +492,13 @@ async def run_pipeline(
                     "xgb_weight": float(prediction_result.xgb_weight),
                     "market_state": market_state_dict,
                 }
-                yield _event("predict", "done", 80,
-                             f"預測訊號: {prediction_result.signal} ({prediction_result.signal_strength:.0%})",
-                             pred_data)
+                yield _event(
+                    "predict",
+                    "done",
+                    80,
+                    f"預測訊號: {prediction_result.signal} ({prediction_result.signal_strength:.0%})",
+                    pred_data,
+                )
             else:
                 yield _event("predict", "error", 80, "預測返回 None")
                 prediction_result = None
@@ -397,13 +506,17 @@ async def run_pipeline(
             logger.error("預測失敗: %s", e)
             yield _event("predict", "error", 80, f"預測失敗: {e}")
     else:
-        yield _event("predict", "skipped", 80, "無可用模型，跳過 ML 預測（僅用 Agent 分析）")
+        yield _event(
+            "predict", "skipped", 80, "無可用模型，跳過 ML 預測（僅用 Agent 分析）"
+        )
 
     # ── Step 8: AGENT ─────────────────────────────────────
     yield _event("agent", "running", 85, "Multi-Agent 分析中...")
 
     ml_signal = prediction_result.signal if prediction_result else "hold"
-    ml_confidence = float(prediction_result.signal_strength) if prediction_result else 0.0
+    ml_confidence = (
+        float(prediction_result.signal_strength) if prediction_result else 0.0
+    )
 
     # Sub-step progress mapping (85 → 92)
     _SUBSTEP_PROGRESS = {
@@ -434,11 +547,23 @@ async def run_pipeline(
                 "signal": ml_signal,
                 "confidence": ml_confidence,
                 "ensemble_return": float(prediction_result.predicted_returns[0])
-                    if prediction_result is not None and len(prediction_result.predicted_returns) > 0 else 0.0,
-                "lstm_return": float(prediction_result.predicted_returns[0] * prediction_result.lstm_weight)
-                    if prediction_result is not None and len(prediction_result.predicted_returns) > 0 else 0.0,
-                "xgb_return": float(prediction_result.predicted_returns[0] * prediction_result.xgb_weight)
-                    if prediction_result is not None and len(prediction_result.predicted_returns) > 0 else 0.0,
+                if prediction_result is not None
+                and len(prediction_result.predicted_returns) > 0
+                else 0.0,
+                "lstm_return": float(
+                    prediction_result.predicted_returns[0]
+                    * prediction_result.lstm_weight
+                )
+                if prediction_result is not None
+                and len(prediction_result.predicted_returns) > 0
+                else 0.0,
+                "xgb_return": float(
+                    prediction_result.predicted_returns[0]
+                    * prediction_result.xgb_weight
+                )
+                if prediction_result is not None
+                and len(prediction_result.predicted_returns) > 0
+                else 0.0,
             },
         )
 
@@ -451,7 +576,9 @@ async def run_pipeline(
                 context=context,
                 ml_signal=ml_signal,
                 ml_confidence=ml_confidence,
-                market_state=market_state_name if prediction_result and prediction_result.market_state else None,
+                market_state=market_state_name
+                if prediction_result and prediction_result.market_state
+                else None,
                 progress_queue=progress_queue,
             )
 
@@ -470,13 +597,22 @@ async def run_pipeline(
                 role = evt.get("role", "")
                 sig = evt.get("signal", "")
                 conf = evt.get("confidence", 0)
-                role_label = {"technical": "技術分析師", "sentiment": "情緒分析師",
-                              "fundamental": "基本面分析師", "quant": "量化分析師"}.get(role, role)
+                role_label = {
+                    "technical": "技術分析師",
+                    "sentiment": "情緒分析師",
+                    "fundamental": "基本面分析師",
+                    "quant": "量化分析師",
+                }.get(role, role)
                 if sig == "error":
                     msg = f"{role_label}: 分析失敗"
                 else:
-                    sig_label = {"buy": "BUY", "strong_buy": "BUY", "sell": "SELL",
-                                 "strong_sell": "SELL", "hold": "HOLD"}.get(sig, sig.upper())
+                    sig_label = {
+                        "buy": "BUY",
+                        "strong_buy": "BUY",
+                        "sell": "SELL",
+                        "strong_sell": "SELL",
+                        "hold": "HOLD",
+                    }.get(sig, sig.upper())
                     msg = f"{role_label}: {sig_label} ({int(conf * 100)}%)"
                 return (prog, msg)
 
@@ -488,12 +624,16 @@ async def run_pipeline(
 
             elif substep == "rule_engine":
                 action = evt.get("action", "hold")
-                action_label = {"buy": "買進", "sell": "賣出", "hold": "持有"}.get(action, action)
+                action_label = {"buy": "買進", "sell": "賣出", "hold": "持有"}.get(
+                    action, action
+                )
                 return (91, f"規則引擎: {action_label}")
 
             elif substep == "risk_check":
                 approved = evt.get("approved", True)
-                msg = "風控: 通過" if approved else f"風控: 否決 — {evt.get('notes', '')}"
+                msg = (
+                    "風控: 通過" if approved else f"風控: 否決 — {evt.get('notes', '')}"
+                )
                 return (92, msg)
 
             else:
@@ -519,7 +659,13 @@ async def run_pipeline(
                         _analyst_done_count += 1
                     mapped = _map_substep_event(substep, evt, _analyst_done_count)
                     if mapped:
-                        yield _event("agent", "running", mapped[0], mapped[1], {"substep": substep, **evt})
+                        yield _event(
+                            "agent",
+                            "running",
+                            mapped[0],
+                            mapped[1],
+                            {"substep": substep, **evt},
+                        )
                 break
 
             try:
@@ -536,7 +682,13 @@ async def run_pipeline(
 
             mapped = _map_substep_event(substep, evt, _analyst_done_count)
             if mapped:
-                yield _event("agent", "running", mapped[0], mapped[1], {"substep": substep, **evt})
+                yield _event(
+                    "agent",
+                    "running",
+                    mapped[0],
+                    mapped[1],
+                    {"substep": substep, **evt},
+                )
 
         # Await task result (may raise)
         agent_decision = await task
@@ -544,12 +696,14 @@ async def run_pipeline(
         # 轉換 Agent 結果
         analyst_reports = []
         for msg in agent_decision.analyst_reports:
-            analyst_reports.append({
-                "role": msg.sender.value,
-                "signal": msg.signal.value if msg.signal else None,
-                "confidence": msg.confidence,
-                "reasoning": msg.reasoning,
-            })
+            analyst_reports.append(
+                {
+                    "role": msg.sender.value,
+                    "signal": msg.signal.value if msg.signal else None,
+                    "confidence": msg.confidence,
+                    "reasoning": msg.reasoning,
+                }
+            )
 
         researcher = None
         if agent_decision.researcher_report:
@@ -571,9 +725,13 @@ async def run_pipeline(
             "analyst_reports": analyst_reports,
             "researcher": researcher,
         }
-        yield _event("agent", "done", 92,
-                     f"Agent 建議: {agent_decision.action} ({agent_decision.confidence:.0%})",
-                     agent_data)
+        yield _event(
+            "agent",
+            "done",
+            92,
+            f"Agent 建議: {agent_decision.action} ({agent_decision.confidence:.0%})",
+            agent_data,
+        )
     except Exception as e:
         logger.error("Agent 分析失敗: %s", e)
         yield _event("agent", "error", 92, f"Agent 分析失敗: {e}")
@@ -615,11 +773,21 @@ async def run_pipeline(
         "sentiment": sentiment_data,
         "prediction": {
             "signal": prediction_result.signal if prediction_result else None,
-            "signal_strength": float(prediction_result.signal_strength) if prediction_result else 0,
-            "predicted_prices": prediction_result.predicted_prices.tolist() if prediction_result else [],
-            "confidence_lower": prediction_result.confidence_lower.tolist() if prediction_result else [],
-            "confidence_upper": prediction_result.confidence_upper.tolist() if prediction_result else [],
-        } if prediction_result else None,
+            "signal_strength": float(prediction_result.signal_strength)
+            if prediction_result
+            else 0,
+            "predicted_prices": prediction_result.predicted_prices.tolist()
+            if prediction_result
+            else [],
+            "confidence_lower": prediction_result.confidence_lower.tolist()
+            if prediction_result
+            else [],
+            "confidence_upper": prediction_result.confidence_upper.tolist()
+            if prediction_result
+            else [],
+        }
+        if prediction_result
+        else None,
         "agent": agent_data,
     }
 
@@ -637,8 +805,11 @@ async def run_pipeline(
             reasoning=final_reasoning,
             agent_decision=agent_data,
             technical_data=technical_data,
-            sentiment_data={k: v for k, v in sentiment_data.items()
-                           if k not in ("news_headlines", "global_context")},
+            sentiment_data={
+                k: v
+                for k, v in sentiment_data.items()
+                if k not in ("news_headlines", "global_context")
+            },
             prediction_data=synthesis.get("prediction"),
         )
         logger.info("Pipeline result saved for %s", stock_id)

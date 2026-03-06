@@ -13,64 +13,106 @@ export function SentimentTab({ result }: SentimentTabProps) {
 
   return (
     <div className="space-y-6">
-      {/* News sentiment factor */}
-      {newsSentiment && (
-        <div className="glass-card p-5">
+      {/* Row 1: News Sentiment (3/5) + Related Factors (2/5) */}
+      <div className="grid grid-cols-1 lg:grid-cols-5 gap-4">
+        {/* News sentiment factor — 3 cols */}
+        {newsSentiment && (
+          <div className="glass-card p-5 lg:col-span-3">
+            <div
+              className="text-[9px] tracking-[0.15em] font-semibold mb-4"
+              style={{ color: "var(--accent-gold)", fontFamily: "'Space Mono', monospace" }}
+            >
+              NEWS SENTIMENT FACTOR
+            </div>
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+              <MiniStat
+                label="情緒分數"
+                value={newsSentiment.score.toFixed(2)}
+                color={
+                  newsSentiment.score > 0.6
+                    ? "#EF5350"
+                    : newsSentiment.score < 0.4
+                    ? "#26A69A"
+                    : "#FFC107"
+                }
+              />
+              <MiniStat
+                label="可用性"
+                value={newsSentiment.available ? "有效" : "無資料"}
+                color={newsSentiment.available ? "rgba(34,197,94,0.8)" : "var(--text-muted)"}
+              />
+              <MiniStat
+                label="權重"
+                value={`${((newsSentiment.weight || 0) * 100).toFixed(0)}%`}
+              />
+              <MiniStat
+                label="新鮮度"
+                value={`${((newsSentiment.freshness || 0) * 100).toFixed(0)}%`}
+              />
+            </div>
+
+            {/* Components breakdown */}
+            {newsSentiment.components && Object.keys(newsSentiment.components).length > 0 && (
+              <div className="mt-4 space-y-2">
+                <div className="text-[9px] tracking-wider uppercase mb-2" style={{ color: "var(--text-muted)" }}>
+                  子分量
+                </div>
+                {Object.entries(newsSentiment.components).map(([key, val]) => (
+                  <div key={key} className="flex items-center justify-between py-1">
+                    <span className="text-xs" style={{ color: "var(--text-secondary)" }}>
+                      {key}
+                    </span>
+                    <span className="font-num text-xs" style={{ color: "var(--text-primary)" }}>
+                      {typeof val === "number" ? val.toFixed(3) : String(val)}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Related factors — 2 cols */}
+        <div className={`glass-card p-5 ${newsSentiment ? "lg:col-span-2" : "lg:col-span-5"}`}>
           <div
             className="text-[9px] tracking-[0.15em] font-semibold mb-4"
             style={{ color: "var(--accent-gold)", fontFamily: "'Space Mono', monospace" }}
           >
-            NEWS SENTIMENT FACTOR
+            SENTIMENT-RELATED FACTORS
           </div>
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-            <MiniStat
-              label="情緒分數"
-              value={newsSentiment.score.toFixed(2)}
-              color={
-                newsSentiment.score > 0.6
-                  ? "#EF5350"
-                  : newsSentiment.score < 0.4
-                  ? "#26A69A"
-                  : "#FFC107"
-              }
-            />
-            <MiniStat
-              label="可用性"
-              value={newsSentiment.available ? "有效" : "無資料"}
-              color={newsSentiment.available ? "rgba(34,197,94,0.8)" : "var(--text-muted)"}
-            />
-            <MiniStat
-              label="權重"
-              value={`${((newsSentiment.weight || 0) * 100).toFixed(0)}%`}
-            />
-            <MiniStat
-              label="新鮮度"
-              value={`${((newsSentiment.freshness || 0) * 100).toFixed(0)}%`}
-            />
-          </div>
+          <div className="space-y-2">
+            {["margin_sentiment", "global_context", "news_sentiment"].map((key) => {
+              const detail = result.factor_details?.[key];
+              if (!detail) return null;
+              const scoreColor =
+                detail.score > 0.6 ? "#EF5350" : detail.score < 0.4 ? "#26A69A" : "#FFC107";
 
-          {/* Components breakdown */}
-          {newsSentiment.components && Object.keys(newsSentiment.components).length > 0 && (
-            <div className="mt-4 space-y-2">
-              <div className="text-[9px] tracking-wider uppercase mb-2" style={{ color: "var(--text-muted)" }}>
-                子分量
-              </div>
-              {Object.entries(newsSentiment.components).map(([key, val]) => (
-                <div key={key} className="flex items-center justify-between py-1">
-                  <span className="text-xs" style={{ color: "var(--text-secondary)" }}>
-                    {key}
+              return (
+                <div key={key} className="flex items-center gap-3">
+                  <span className="text-xs w-20 shrink-0" style={{ color: "var(--text-secondary)" }}>
+                    {FACTOR_LABELS[key] || key}
                   </span>
-                  <span className="font-num text-xs" style={{ color: "var(--text-primary)" }}>
-                    {typeof val === "number" ? val.toFixed(3) : String(val)}
+                  <div className="flex-1 relative h-2 rounded-full overflow-hidden" style={{ background: "rgba(255,255,255,0.04)" }}>
+                    <div
+                      className="absolute inset-y-0 left-0 rounded-full"
+                      style={{
+                        width: detail.available ? `${detail.score * 100}%` : "0%",
+                        background: scoreColor,
+                        opacity: 0.7,
+                      }}
+                    />
+                  </div>
+                  <span className="font-num text-xs w-10 text-right" style={{ color: scoreColor }}>
+                    {detail.available ? detail.score.toFixed(2) : "N/A"}
                   </span>
                 </div>
-              ))}
-            </div>
-          )}
+              );
+            })}
+          </div>
         </div>
-      )}
+      </div>
 
-      {/* Narrative sentiment info */}
+      {/* Row 2: Narrative sentiment — only show if has content */}
       {narrative && (narrative.key_drivers?.length > 0 || narrative.risks?.length > 0) && (
         <div className="glass-card p-5">
           <div
@@ -89,45 +131,6 @@ export function SentimentTab({ result }: SentimentTabProps) {
           )}
         </div>
       )}
-
-      {/* Related factors */}
-      <div className="glass-card p-5">
-        <div
-          className="text-[9px] tracking-[0.15em] font-semibold mb-4"
-          style={{ color: "var(--accent-gold)", fontFamily: "'Space Mono', monospace" }}
-        >
-          SENTIMENT-RELATED FACTORS
-        </div>
-        <div className="space-y-2">
-          {["margin_sentiment", "global_context", "news_sentiment"].map((key) => {
-            const detail = result.factor_details?.[key];
-            if (!detail) return null;
-            const scoreColor =
-              detail.score > 0.6 ? "#EF5350" : detail.score < 0.4 ? "#26A69A" : "#FFC107";
-
-            return (
-              <div key={key} className="flex items-center gap-3">
-                <span className="text-xs w-20 shrink-0" style={{ color: "var(--text-secondary)" }}>
-                  {FACTOR_LABELS[key] || key}
-                </span>
-                <div className="flex-1 relative h-2 rounded-full overflow-hidden" style={{ background: "rgba(255,255,255,0.04)" }}>
-                  <div
-                    className="absolute inset-y-0 left-0 rounded-full"
-                    style={{
-                      width: detail.available ? `${detail.score * 100}%` : "0%",
-                      background: scoreColor,
-                      opacity: 0.7,
-                    }}
-                  />
-                </div>
-                <span className="font-num text-xs w-10 text-right" style={{ color: scoreColor }}>
-                  {detail.available ? detail.score.toFixed(2) : "N/A"}
-                </span>
-              </div>
-            );
-          })}
-        </div>
-      </div>
     </div>
   );
 }

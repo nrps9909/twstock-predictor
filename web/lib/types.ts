@@ -121,6 +121,11 @@ export interface NarrativeResult {
   key_levels: Record<string, number>;
   position_suggestion: string;
   source: string;
+  // Opus verdict (Phase 5.5)
+  verdict?: string;
+  verdict_short?: string;
+  risk_warning?: string;
+  confidence_comment?: string;
 }
 
 export interface RiskDecision {

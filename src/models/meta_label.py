@@ -52,7 +52,11 @@ class MetaLabeler:
         ]
 
         if hmm_probs is not None and len(hmm_probs) == n:
-            features.append(np.atleast_2d(hmm_probs) if hmm_probs.ndim == 2 else hmm_probs.reshape(-1, 1))
+            features.append(
+                np.atleast_2d(hmm_probs)
+                if hmm_probs.ndim == 2
+                else hmm_probs.reshape(-1, 1)
+            )
 
         if volatility is not None and len(volatility) == n:
             features.append(volatility.reshape(-1, 1))
@@ -151,18 +155,23 @@ class MetaLabeler:
     def save(self, path: str | Path):
         """儲存 meta-labeler"""
         import joblib
+
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
-        joblib.dump({
-            "model": self.model,
-            "is_fitted": self.is_fitted,
-            "max_position": self.max_position,
-        }, path)
+        joblib.dump(
+            {
+                "model": self.model,
+                "is_fitted": self.is_fitted,
+                "max_position": self.max_position,
+            },
+            path,
+        )
         logger.info("Meta-labeler 已儲存至 %s", path)
 
     def load(self, path: str | Path):
         """載入 meta-labeler"""
         import joblib
+
         path = Path(path)
         if not path.exists():
             logger.warning("Meta-labeler 檔案不存在: %s", path)

@@ -8,6 +8,7 @@ from typing import Any
 
 class AgentRole(str, Enum):
     """Agent 角色"""
+
     TECHNICAL = "technical"
     SENTIMENT = "sentiment"
     FUNDAMENTAL = "fundamental"
@@ -20,6 +21,7 @@ class AgentRole(str, Enum):
 
 class Signal(str, Enum):
     """交易訊號"""
+
     STRONG_BUY = "strong_buy"
     BUY = "buy"
     HOLD = "hold"
@@ -30,6 +32,7 @@ class Signal(str, Enum):
 @dataclass
 class AgentMessage:
     """Agent 間通訊訊息"""
+
     sender: AgentRole
     content: dict[str, Any]
     signal: Signal | None = None
@@ -42,6 +45,7 @@ class AgentMessage:
 @dataclass
 class MarketContext:
     """市場環境快照"""
+
     stock_id: str
     current_price: float
     date: str  # YYYY-MM-DD
@@ -55,6 +59,7 @@ class MarketContext:
 @dataclass
 class TradeDecision:
     """最終交易決策"""
+
     stock_id: str
     action: str  # "buy", "sell", "hold"
     quantity: int = 0

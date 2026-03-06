@@ -1,7 +1,6 @@
 """系統狀態 API"""
 
 from datetime import date
-from pathlib import Path
 from fastapi import APIRouter, HTTPException
 
 from src.utils.constants import STOCK_LIST

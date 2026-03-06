@@ -11,42 +11,67 @@ import numpy as np
 import pandas as pd
 
 from src.analysis.technical import TechnicalAnalyzer
-from src.analysis.labels import triple_barrier_label, compute_sample_weights
+from src.analysis.labels import (
+    triple_barrier_label,
+    triple_barrier_classify,
+    compute_sample_weights,
+)
 from src.db.database import get_stock_prices, get_sentiment
-from src.utils.config import settings
 
 logger = logging.getLogger(__name__)
 
 # 完整特徵欄位清單（含 Tier 2 新增）
 FEATURE_COLUMNS = [
     # 價格特徵
-    "close", "open", "high", "low", "volume",
-    "return_1d", "return_5d", "return_20d",
-
+    "close",
+    "open",
+    "high",
+    "low",
+    "volume",
+    "return_1d",
+    "return_5d",
+    "return_20d",
     # 技術指標
-    "sma_5", "sma_20", "sma_60",
-    "rsi_14", "kd_k", "kd_d",
-    "macd", "macd_signal", "macd_hist",
-    "bias_5", "bias_10", "bias_20",
-    "bb_upper", "bb_lower", "bb_width",
-    "obv", "adx",
-
+    "sma_5",
+    "sma_20",
+    "sma_60",
+    "rsi_14",
+    "kd_k",
+    "kd_d",
+    "macd",
+    "macd_signal",
+    "macd_hist",
+    "bias_5",
+    "bias_10",
+    "bias_20",
+    "bb_upper",
+    "bb_lower",
+    "bb_width",
+    "obv",
+    "adx",
     # 情緒特徵
-    "sentiment_score", "sentiment_ma5",
-    "sentiment_change", "post_volume", "bullish_ratio",
-
+    "sentiment_score",
+    "sentiment_ma5",
+    "sentiment_change",
+    "post_volume",
+    "bullish_ratio",
     # 籌碼特徵
-    "foreign_buy_sell", "trust_buy_sell", "dealer_buy_sell",
-    "margin_balance", "short_balance",
-
+    "foreign_buy_sell",
+    "trust_buy_sell",
+    "dealer_buy_sell",
+    "margin_balance",
+    "short_balance",
     # Tier 2: 波動率特徵
-    "realized_vol_5d", "realized_vol_20d", "parkinson_vol",
-
+    "realized_vol_5d",
+    "realized_vol_20d",
+    "parkinson_vol",
     # Tier 2: 微結構特徵
-    "volume_ratio_5d", "spread_proxy",
-
+    "volume_ratio_5d",
+    "spread_proxy",
     # Tier 2: 日曆特徵
-    "day_of_week", "month", "is_settlement",
+    "day_of_week",
+    "month",
+    "is_settlement",
 ]
 
 # Legacy target (保留向後相容)
@@ -55,6 +80,7 @@ TARGET_COLUMN = "return_next_5d"
 # Triple Barrier target
 TB_TARGET_COLUMN = "tb_label"
 TB_WEIGHT_COLUMN = "sample_weight"
+
 
 # 台灣期貨結算日（每月第三個星期三）
 def _is_settlement_day(d: dt_date) -> bool:
@@ -70,6 +96,21 @@ class FeatureEngineer:
 
     def __init__(self):
         self.ta = TechnicalAnalyzer()
+
+    def _sanitize_array(
+        self, X: np.ndarray, clip_percentile: float = 99.5
+    ) -> np.ndarray:
+        """Replace inf/NaN and winsorize extreme values per feature column."""
+        X = np.nan_to_num(X, nan=0.0, posinf=0.0, neginf=0.0)
+        for col_idx in range(X.shape[1]):
+            col = X[:, col_idx]
+            if len(col) < 10:
+                continue
+            lo = np.percentile(col, 100 - clip_percentile)
+            hi = np.percentile(col, clip_percentile)
+            if hi > lo:
+                X[:, col_idx] = np.clip(col, lo, hi)
+        return X
 
     def build_features(
         self,
@@ -120,6 +161,15 @@ class FeatureEngineer:
             atr_window=14,
         )
 
+        # Triple Barrier classification labels (for direction accuracy eval)
+        df["tb_class"] = triple_barrier_classify(
+            df,
+            upper_multiplier=2.0,
+            lower_multiplier=2.0,
+            max_holding=10,
+            atr_window=14,
+        )
+
         # 樣本唯一性權重
         df[TB_WEIGHT_COLUMN] = compute_sample_weights(
             df, label_col=TB_TARGET_COLUMN, max_holding=10
@@ -143,8 +193,11 @@ class FeatureEngineer:
 
         # Parkinson high-low volatility estimator
         if "high" in df.columns and "low" in df.columns:
-            log_hl = np.log(df["high"] / df["low"])
-            df["parkinson_vol"] = (log_hl ** 2 / (4 * np.log(2))).rolling(20).mean().apply(np.sqrt)
+            hl_ratio = (df["high"] / df["low"].replace(0, np.nan)).clip(lower=1.0)
+            log_hl = np.log(hl_ratio)
+            df["parkinson_vol"] = (
+                (log_hl**2 / (4 * np.log(2))).rolling(20).mean().apply(np.sqrt)
+            )
         else:
             df["parkinson_vol"] = 0.0
 
@@ -154,7 +207,9 @@ class FeatureEngineer:
         """微結構特徵"""
         if "volume" in df.columns:
             vol_ma5 = df["volume"].rolling(5).mean()
-            df["volume_ratio_5d"] = df["volume"] / vol_ma5.replace(0, np.nan)
+            df["volume_ratio_5d"] = (df["volume"] / vol_ma5.replace(0, np.nan)).clip(
+                upper=10.0
+            )
         else:
             df["volume_ratio_5d"] = 1.0
 
@@ -198,14 +253,18 @@ class FeatureEngineer:
             return price_df
 
         # 每日聚合情緒
-        daily_sent = sentiment_df.groupby("date").agg(
-            sentiment_score=("sentiment_score", "mean"),
-            post_volume=("sentiment_score", "count"),
-            bullish_ratio=(
-                "sentiment_label",
-                lambda x: (x == "bullish").mean(),
-            ),
-        ).reset_index()
+        daily_sent = (
+            sentiment_df.groupby("date")
+            .agg(
+                sentiment_score=("sentiment_score", "mean"),
+                post_volume=("sentiment_score", "count"),
+                bullish_ratio=(
+                    "sentiment_label",
+                    lambda x: (x == "bullish").mean(),
+                ),
+            )
+            .reset_index()
+        )
 
         daily_sent["sentiment_ma5"] = (
             daily_sent["sentiment_score"].rolling(5, min_periods=1).mean()
@@ -219,23 +278,46 @@ class FeatureEngineer:
     def _fill_missing(self, df: pd.DataFrame) -> pd.DataFrame:
         """處理缺失值"""
         # 情緒欄位填 0
-        for col in ["sentiment_score", "sentiment_ma5", "sentiment_change",
-                     "post_volume", "bullish_ratio"]:
+        for col in [
+            "sentiment_score",
+            "sentiment_ma5",
+            "sentiment_change",
+            "post_volume",
+            "bullish_ratio",
+        ]:
             if col in df.columns:
                 df[col] = df[col].fillna(0)
 
         # 籌碼欄位前填
-        for col in ["foreign_buy_sell", "trust_buy_sell", "dealer_buy_sell",
-                     "margin_balance", "short_balance"]:
+        for col in [
+            "foreign_buy_sell",
+            "trust_buy_sell",
+            "dealer_buy_sell",
+            "margin_balance",
+            "short_balance",
+        ]:
             if col in df.columns:
                 df[col] = df[col].ffill().fillna(0)
 
         # 新增特徵填 0
-        for col in ["realized_vol_5d", "realized_vol_20d", "parkinson_vol",
-                     "volume_ratio_5d", "spread_proxy",
-                     "day_of_week", "month", "is_settlement"]:
+        for col in [
+            "realized_vol_5d",
+            "realized_vol_20d",
+            "parkinson_vol",
+            "volume_ratio_5d",
+            "spread_proxy",
+            "day_of_week",
+            "month",
+            "is_settlement",
+        ]:
             if col in df.columns:
                 df[col] = df[col].fillna(0)
+
+        # OBV normalization: scale to unit variance to prevent dominating tree splits
+        if "obv" in df.columns:
+            obv_std = df["obv"].std()
+            if obv_std > 0:
+                df["obv"] = df["obv"] / obv_std
 
         # 技術指標 NaN（前面暖身期）→ 刪除
         df = df.dropna(subset=["sma_60"]).reset_index(drop=True)
@@ -268,7 +350,9 @@ class FeatureEngineer:
         valid = df.dropna(subset=[target_col])
 
         if len(valid) < 50 or len(available_cols) <= max_features:
-            logger.info("特徵數 (%d) <= max (%d)，跳過篩選", len(available_cols), max_features)
+            logger.info(
+                "特徵數 (%d) <= max (%d)，跳過篩選", len(available_cols), max_features
+            )
             return available_cols
 
         X = valid[available_cols].values.astype(np.float32)
@@ -285,7 +369,12 @@ class FeatureEngineer:
         # 持久化重要性分數
         if session_factory is not None and stock_id is not None:
             self._persist_importance(
-                X, y, available_cols, method, session_factory, stock_id,
+                X,
+                y,
+                available_cols,
+                method,
+                session_factory,
+                stock_id,
             )
 
         # 移除高度共線特徵
@@ -293,7 +382,10 @@ class FeatureEngineer:
 
         logger.info(
             "特徵篩選: %d → %d (%s): %s",
-            len(available_cols), len(selected), method, selected,
+            len(available_cols),
+            len(selected),
+            method,
+            selected,
         )
         return selected
 
@@ -319,6 +411,7 @@ class FeatureEngineer:
                 scores = self._compute_shap_scores(X, y)
             else:
                 from sklearn.feature_selection import mutual_info_regression
+
                 scores = mutual_info_regression(X, y, random_state=42)
 
             ranked_idx = np.argsort(scores)[::-1]
@@ -359,16 +452,21 @@ class FeatureEngineer:
         try:
             import xgboost as xgb
             import shap
+
             model = xgb.XGBRegressor(
-                n_estimators=100, max_depth=4, learning_rate=0.1,
-                random_state=42, verbosity=0,
+                n_estimators=100,
+                max_depth=4,
+                learning_rate=0.1,
+                random_state=42,
+                verbosity=0,
             )
             model.fit(X, y)
             explainer = shap.TreeExplainer(model)
-            shap_values = explainer.shap_values(X[:min(500, len(X))])
+            shap_values = explainer.shap_values(X[: min(500, len(X))])
             return np.abs(shap_values).mean(axis=0)
         except ImportError:
             from sklearn.feature_selection import mutual_info_regression
+
             return mutual_info_regression(X, y, random_state=42)
 
     def _select_by_mi(
@@ -398,13 +496,16 @@ class FeatureEngineer:
             import shap
 
             model = xgb.XGBRegressor(
-                n_estimators=100, max_depth=4, learning_rate=0.1,
-                random_state=42, verbosity=0,
+                n_estimators=100,
+                max_depth=4,
+                learning_rate=0.1,
+                random_state=42,
+                verbosity=0,
             )
             model.fit(X, y)
 
             explainer = shap.TreeExplainer(model)
-            shap_values = explainer.shap_values(X[:min(500, len(X))])
+            shap_values = explainer.shap_values(X[: min(500, len(X))])
             importance = np.abs(shap_values).mean(axis=0)
             ranked_idx = np.argsort(importance)[::-1][:max_features]
             return [feature_names[i] for i in ranked_idx]
@@ -446,7 +547,7 @@ class FeatureEngineer:
     def prepare_sequences(
         self,
         df: pd.DataFrame,
-        seq_len: int = 60,
+        seq_len: int = 30,
         feature_cols: list[str] | None = None,
         target_col: str | None = None,
     ) -> tuple[np.ndarray, np.ndarray]:
@@ -465,10 +566,14 @@ class FeatureEngineer:
             feature_cols = [c for c in FEATURE_COLUMNS if c in df.columns]
 
         if target_col is None:
-            target_col = TB_TARGET_COLUMN if TB_TARGET_COLUMN in df.columns else TARGET_COLUMN
+            target_col = (
+                TB_TARGET_COLUMN if TB_TARGET_COLUMN in df.columns else TARGET_COLUMN
+            )
 
-        # 正規化特徵
-        feature_data = df[feature_cols].values
+        # Sanitize features: replace inf/NaN before sequence construction
+        feature_data = np.nan_to_num(
+            df[feature_cols].values.astype(np.float32), nan=0.0, posinf=0.0, neginf=0.0
+        )
         target_data = df[target_col].values
 
         X, y = [], []
@@ -485,20 +590,33 @@ class FeatureEngineer:
         df: pd.DataFrame,
         feature_cols: list[str] | None = None,
         target_col: str | None = None,
-    ) -> tuple[np.ndarray, np.ndarray]:
+        weight_col: str | None = None,
+    ) -> (
+        tuple[np.ndarray, np.ndarray] | tuple[np.ndarray, np.ndarray, np.ndarray | None]
+    ):
         """為 XGBoost 準備表格資料
 
+        Args:
+            weight_col: if provided, return aligned sample weights as 3rd element
+
         Returns:
-            (X, y) where X.shape = (samples, features), y.shape = (samples,)
+            (X, y) or (X, y, weights) where X.shape = (samples, features), y.shape = (samples,)
         """
         if feature_cols is None:
             feature_cols = [c for c in FEATURE_COLUMNS if c in df.columns]
 
         if target_col is None:
-            target_col = TB_TARGET_COLUMN if TB_TARGET_COLUMN in df.columns else TARGET_COLUMN
+            target_col = (
+                TB_TARGET_COLUMN if TB_TARGET_COLUMN in df.columns else TARGET_COLUMN
+            )
 
         valid = df.dropna(subset=[target_col])
         X = valid[feature_cols].values.astype(np.float32)
+        X = self._sanitize_array(X)
         y = valid[target_col].values.astype(np.float32)
+
+        if weight_col is not None:
+            w = valid[weight_col].values if weight_col in valid.columns else None
+            return X, y, w
 
         return X, y

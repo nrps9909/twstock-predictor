@@ -1,7 +1,6 @@
 """模型訓練與預測 API"""
 
 import asyncio
-from datetime import date, timedelta
 from fastapi import APIRouter, HTTPException
 
 from src.utils.constants import STOCK_LIST
@@ -85,6 +84,7 @@ async def predict(stock_id: str, req: PredictRequest):
 def _sanitize(obj):
     """遞迴清理結果中的 numpy 物件"""
     import numpy as np
+
     if isinstance(obj, dict):
         return {k: _sanitize(v) for k, v in obj.items()}
     elif isinstance(obj, list):

@@ -21,13 +21,22 @@ TRANSIENT_STATUS_CODES = {408, 429, 500, 502, 503, 504}
 
 class PermanentError(Exception):
     """不可重試的永久性錯誤"""
+
     pass
 
 
 def is_transient(exc: Exception) -> bool:
     """判斷錯誤是否為暫時性（應重試）"""
-    if isinstance(exc, (requests.ConnectionError, requests.Timeout,
-                        httpx.ConnectError, httpx.ReadTimeout, httpx.ConnectTimeout)):
+    if isinstance(
+        exc,
+        (
+            requests.ConnectionError,
+            requests.Timeout,
+            httpx.ConnectError,
+            httpx.ReadTimeout,
+            httpx.ConnectTimeout,
+        ),
+    ):
         return True
     if isinstance(exc, requests.HTTPError) and exc.response is not None:
         return exc.response.status_code in TRANSIENT_STATUS_CODES
@@ -55,6 +64,7 @@ def retry_with_backoff(
         def fetch_data():
             ...
     """
+
     def decorator(func: Callable[..., T]) -> Callable[..., T]:
         @functools.wraps(func)
         def wrapper(*args, **kwargs) -> T:
@@ -78,13 +88,19 @@ def retry_with_backoff(
 
                     logger.info(
                         "%s: 暫時性錯誤 (attempt %d/%d), %.1fs 後重試: %s",
-                        func.__name__, attempt + 1, max_retries, delay, exc
+                        func.__name__,
+                        attempt + 1,
+                        max_retries,
+                        delay,
+                        exc,
                     )
                     time.sleep(delay)
                     delay = min(delay * backoff_factor, max_delay)
 
             raise last_exc  # type: ignore[misc]
+
         return wrapper
+
     return decorator
 
 

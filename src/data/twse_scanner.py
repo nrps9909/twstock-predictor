@@ -24,7 +24,7 @@ _rate_limiter = RateLimiter(calls_per_second=1.0)
 
 # TTL cache for TWSE daily data — avoid redundant fetches within 5 minutes
 _t86_cache: dict[str, tuple[float, pd.DataFrame]] = {}
-_CACHE_TTL = 300  # seconds
+_CACHE_TTL = 21600  # 6 hours — T86 data only updates once daily after market close
 
 # TWSE T86 JSON endpoint
 T86_URL = "https://www.twse.com.tw/rwd/zh/fund/T86"
@@ -61,10 +61,16 @@ class TWSEScanner:
             "response": "json",
         }
 
-        resp = requests.get(T86_URL, params=params, timeout=15, verify=False, headers={
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-            "Accept": "application/json",
-        })
+        resp = requests.get(
+            T86_URL,
+            params=params,
+            timeout=15,
+            verify=False,
+            headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                "Accept": "application/json",
+            },
+        )
         resp.raise_for_status()
         data = resp.json()
 
@@ -94,10 +100,10 @@ class TWSEScanner:
                         return int(s)
                     return int(str(s).replace(",", "").strip())
 
-                # Foreign investors (combined)
-                foreign_buy = parse_int(row[2])
-                foreign_sell = parse_int(row[3])
-                foreign_net = parse_int(row[4])
+                # Foreign investors (combined: general + dealer)
+                foreign_buy = parse_int(row[2]) + parse_int(row[5])
+                foreign_sell = parse_int(row[3]) + parse_int(row[6])
+                foreign_net = parse_int(row[4]) + parse_int(row[7])
 
                 # Investment trust
                 trust_buy = parse_int(row[8])
@@ -108,19 +114,21 @@ class TWSEScanner:
                 dealer_net = parse_int(row[11])
 
                 # Convert from shares to lots (張)
-                records.append({
-                    "stock_id": stock_id,
-                    "stock_name": stock_name,
-                    "foreign_buy": foreign_buy // 1000,
-                    "foreign_sell": foreign_sell // 1000,
-                    "foreign_net": foreign_net // 1000,
-                    "trust_buy": trust_buy // 1000,
-                    "trust_sell": trust_sell // 1000,
-                    "trust_net": trust_net // 1000,
-                    "dealer_net": dealer_net // 1000,
-                    "total_net": (foreign_net + trust_net + dealer_net) // 1000,
-                })
-            except (ValueError, IndexError) as e:
+                records.append(
+                    {
+                        "stock_id": stock_id,
+                        "stock_name": stock_name,
+                        "foreign_buy": foreign_buy // 1000,
+                        "foreign_sell": foreign_sell // 1000,
+                        "foreign_net": foreign_net // 1000,
+                        "trust_buy": trust_buy // 1000,
+                        "trust_sell": trust_sell // 1000,
+                        "trust_net": trust_net // 1000,
+                        "dealer_net": dealer_net // 1000,
+                        "total_net": (foreign_net + trust_net + dealer_net) // 1000,
+                    }
+                )
+            except (ValueError, IndexError):
                 continue
 
         df = pd.DataFrame(records)
@@ -183,22 +191,33 @@ class TWSEScanner:
         combined = pd.concat(all_dfs, ignore_index=True)
 
         # Aggregate by stock
-        agg = combined.groupby(["stock_id", "stock_name"]).agg(
-            trust_cumulative=("trust_net", "sum"),
-            foreign_cumulative=("foreign_net", "sum"),
-            dealer_cumulative=("dealer_net", "sum"),
-            total_cumulative=("total_net", "sum"),
-            trade_days=("trade_date", "nunique"),
-        ).reset_index()
+        agg = (
+            combined.groupby(["stock_id", "stock_name"])
+            .agg(
+                trust_cumulative=("trust_net", "sum"),
+                foreign_cumulative=("foreign_net", "sum"),
+                dealer_cumulative=("dealer_net", "sum"),
+                total_cumulative=("total_net", "sum"),
+                trade_days=("trade_date", "nunique"),
+            )
+            .reset_index()
+        )
 
         # Calculate consecutive buy days for trust
         def _consecutive_buy_days(stock_df, column):
-            """Count consecutive positive days from latest date backward"""
+            """Count consecutive buy/sell days from latest date backward.
+            Positive = consecutive buy days, negative = consecutive sell days."""
             sorted_df = stock_df.sort_values("trade_date", ascending=False)
             count = 0
             for _, row in sorted_df.iterrows():
                 if row[column] > 0:
+                    if count < 0:
+                        break
                     count += 1
+                elif row[column] < 0:
+                    if count > 0:
+                        break
+                    count -= 1
                 else:
                     break
             return count
@@ -208,17 +227,23 @@ class TWSEScanner:
             stock_df = combined[combined["stock_id"] == stock_id]
             consecutive_data[stock_id] = {
                 "trust_consecutive_days": _consecutive_buy_days(stock_df, "trust_net"),
-                "foreign_consecutive_days": _consecutive_buy_days(stock_df, "foreign_net"),
+                "foreign_consecutive_days": _consecutive_buy_days(
+                    stock_df, "foreign_net"
+                ),
             }
 
         # Add consecutive data
         agg["trust_consecutive_days"] = agg["stock_id"].map(
-            lambda x: consecutive_data.get(x, {}).get("trust_consecutive_days", 0))
+            lambda x: consecutive_data.get(x, {}).get("trust_consecutive_days", 0)
+        )
         agg["foreign_consecutive_days"] = agg["stock_id"].map(
-            lambda x: consecutive_data.get(x, {}).get("foreign_consecutive_days", 0))
+            lambda x: consecutive_data.get(x, {}).get("foreign_consecutive_days", 0)
+        )
 
         # Sync buy: both foreign and trust cumulative positive
-        agg["sync_buy"] = (agg["trust_cumulative"] > 0) & (agg["foreign_cumulative"] > 0)
+        agg["sync_buy"] = (agg["trust_cumulative"] > 0) & (
+            agg["foreign_cumulative"] > 0
+        )
 
         return agg
 
@@ -322,10 +347,16 @@ class TWSEScanner:
         }
 
         try:
-            resp = requests.get(url, params=params, timeout=15, verify=False, headers={
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                "Accept": "application/json",
-            })
+            resp = requests.get(
+                url,
+                params=params,
+                timeout=15,
+                verify=False,
+                headers={
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                    "Accept": "application/json",
+                },
+            )
             resp.raise_for_status()
             data = resp.json()
 
@@ -351,7 +382,12 @@ class TWSEScanner:
                     change_pct = None
                     for col_idx in [3, 2]:
                         try:
-                            val = str(row[col_idx]).replace(",", "").replace("%", "").strip()
+                            val = (
+                                str(row[col_idx])
+                                .replace(",", "")
+                                .replace("%", "")
+                                .strip()
+                            )
                             if val and val not in ("--", ""):
                                 change_pct = float(val)
                                 break
@@ -366,7 +402,9 @@ class TWSEScanner:
                 except (ValueError, IndexError):
                     continue
 
-            logger.info("TWSE industry indices: %s", {k: f"{v:.4f}" for k, v in result.items()})
+            logger.info(
+                "TWSE industry indices: %s", {k: f"{v:.4f}" for k, v in result.items()}
+            )
             return result
 
         except Exception as e:

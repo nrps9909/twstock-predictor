@@ -381,4 +381,12 @@ body {
     0%, 100% { filter: brightness(1); }
     50% { filter: brightness(1.2); }
   }
+
+  /* ─── Sticky Backdrop ──────────────────────────── */
+  .backdrop-blur-sticky {
+    background: rgba(11, 14, 22, 0.85);
+    backdrop-filter: blur(16px) saturate(180%);
+    -webkit-backdrop-filter: blur(16px) saturate(180%);
+    border-bottom: 1px solid var(--border);
+  }
 }

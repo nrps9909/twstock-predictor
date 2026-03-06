@@ -1,6 +1,6 @@
 """股價資料抓取模組 — FinMind API + twstock"""
 
-from datetime import date, timedelta
+from datetime import date
 import logging
 
 import pandas as pd
@@ -49,9 +49,7 @@ class StockFetcher:
 
     # ── 日K線資料 ────────────────────────────────────────
 
-    def fetch_daily_prices(
-        self, stock_id: str, start: str, end: str
-    ) -> pd.DataFrame:
+    def fetch_daily_prices(self, stock_id: str, start: str, end: str) -> pd.DataFrame:
         """抓取日K線資料
 
         Args:
@@ -63,9 +61,7 @@ class StockFetcher:
             DataFrame(date, open, high, low, close, volume)
         """
         try:
-            df = self._query_finmind(
-                "TaiwanStockPrice", stock_id, start, end
-            )
+            df = self._query_finmind("TaiwanStockPrice", stock_id, start, end)
         except Exception as e:
             logger.error("抓取 %s 日K線失敗: %s", stock_id, e)
             return pd.DataFrame()
@@ -73,14 +69,16 @@ class StockFetcher:
         if df.empty:
             return df
 
-        df = df.rename(columns={
-            "Trading_Volume": "volume",
-            "Trading_money": "trading_money",
-            "open": "open",
-            "max": "high",
-            "min": "low",
-            "close": "close",
-        })
+        df = df.rename(
+            columns={
+                "Trading_Volume": "volume",
+                "Trading_money": "trading_money",
+                "open": "open",
+                "max": "high",
+                "min": "low",
+                "close": "close",
+            }
+        )
         df["date"] = pd.to_datetime(df["date"]).dt.date
         # FinMind volume 單位為股，轉為張（÷1000）
         if "volume" in df.columns:
@@ -90,9 +88,7 @@ class StockFetcher:
 
     # ── 三大法人買賣超 ───────────────────────────────────
 
-    def fetch_institutional(
-        self, stock_id: str, start: str, end: str
-    ) -> pd.DataFrame:
+    def fetch_institutional(self, stock_id: str, start: str, end: str) -> pd.DataFrame:
         """抓取三大法人買賣超資料
 
         Returns:
@@ -125,22 +121,28 @@ class StockFetcher:
 
         result = pd.DataFrame({"date": pivot["date"]})
         # 外資 — FinMind 欄位名稱可能為 "Foreign_Investor" 或含子分類
-        foreign_cols = [c for c in pivot.columns if "Foreign" in str(c) or "外資" in str(c)]
-        result["foreign_buy_sell"] = pivot[foreign_cols].sum(axis=1) if foreign_cols else 0
+        foreign_cols = [
+            c for c in pivot.columns if "Foreign" in str(c) or "外資" in str(c)
+        ]
+        result["foreign_buy_sell"] = (
+            pivot[foreign_cols].sum(axis=1) if foreign_cols else 0
+        )
 
-        trust_cols = [c for c in pivot.columns if "Investment_Trust" in str(c) or "投信" in str(c)]
+        trust_cols = [
+            c for c in pivot.columns if "Investment_Trust" in str(c) or "投信" in str(c)
+        ]
         result["trust_buy_sell"] = pivot[trust_cols].sum(axis=1) if trust_cols else 0
 
-        dealer_cols = [c for c in pivot.columns if "Dealer" in str(c) or "自營" in str(c)]
+        dealer_cols = [
+            c for c in pivot.columns if "Dealer" in str(c) or "自營" in str(c)
+        ]
         result["dealer_buy_sell"] = pivot[dealer_cols].sum(axis=1) if dealer_cols else 0
 
         return result
 
     # ── 融資融券 ─────────────────────────────────────────
 
-    def fetch_margin_trading(
-        self, stock_id: str, start: str, end: str
-    ) -> pd.DataFrame:
+    def fetch_margin_trading(self, stock_id: str, start: str, end: str) -> pd.DataFrame:
         """抓取融資融券資料
 
         Returns:
@@ -158,18 +160,18 @@ class StockFetcher:
             return df
 
         df["date"] = pd.to_datetime(df["date"]).dt.date
-        result = pd.DataFrame({
-            "date": df["date"],
-            "margin_balance": df.get("MarginPurchaseTodayBalance", 0),
-            "short_balance": df.get("ShortSaleTodayBalance", 0),
-        })
+        result = pd.DataFrame(
+            {
+                "date": df["date"],
+                "margin_balance": df.get("MarginPurchaseTodayBalance", 0),
+                "short_balance": df.get("ShortSaleTodayBalance", 0),
+            }
+        )
         return result
 
     # ── 合併所有資料 ─────────────────────────────────────
 
-    def fetch_all(
-        self, stock_id: str, start: str, end: str
-    ) -> pd.DataFrame:
+    def fetch_all(self, stock_id: str, start: str, end: str) -> pd.DataFrame:
         """抓取並合併日K + 法人 + 融資融券
 
         Returns:
@@ -193,9 +195,7 @@ class StockFetcher:
 
     # ── FinMind 每日 P/E, P/B, 殖利率 ──────────────────
 
-    def fetch_per_pbr(
-        self, stock_id: str, start: str, end: str
-    ) -> pd.DataFrame:
+    def fetch_per_pbr(self, stock_id: str, start: str, end: str) -> pd.DataFrame:
         """FinMind TaiwanStockPER — 每日 P/E, P/B, 殖利率
 
         Returns:
@@ -239,9 +239,7 @@ class StockFetcher:
             DataFrame with dividend result columns
         """
         try:
-            df = self._query_finmind(
-                "TaiwanStockDividendResult", stock_id, start, end
-            )
+            df = self._query_finmind("TaiwanStockDividendResult", stock_id, start, end)
         except Exception as e:
             logger.error("抓取 %s 除權息失敗: %s", stock_id, e)
             return pd.DataFrame()
@@ -260,6 +258,7 @@ class StockFetcher:
         """使用 twstock 取得即時報價"""
         try:
             import twstock
+
             stock = twstock.realtime.get(stock_id)
             if stock.get("success"):
                 info = stock["realtime"]
@@ -287,15 +286,16 @@ class StockFetcher:
             list of {"stock_id", "name", "delist_date", "reason", "merged_into"}
         """
         from src.utils.constants import DELISTED_STOCKS
-        return [
-            {"stock_id": k, **v}
-            for k, v in DELISTED_STOCKS.items()
-        ]
+
+        return [{"stock_id": k, **v} for k, v in DELISTED_STOCKS.items()]
 
     # ── As-of 時間戳 ──────────────────────────────────
 
     def fetch_all_with_as_of(
-        self, stock_id: str, start: str, end: str,
+        self,
+        stock_id: str,
+        start: str,
+        end: str,
     ) -> pd.DataFrame:
         """抓取資料並標記 as_of_date = today"""
         df = self.fetch_all(stock_id, start, end)

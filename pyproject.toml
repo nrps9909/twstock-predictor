@@ -23,7 +23,6 @@ dependencies = [
     # ML Advanced (Tier 2)
     "pytorch-forecasting>=1.0",
     "lightning>=2.2",
-    "arch>=7.0",             # GARCH 波動率
     "hmmlearn>=0.3",         # HMM 市場狀態偵測
 
     # Database
@@ -34,20 +33,6 @@ dependencies = [
     "uvicorn>=0.29",
     "httpx>=0.27",
     "beautifulsoup4>=4.12",
-
-    # Frontend
-    "streamlit>=1.35",
-    "plotly>=5.22",
-
-    # Agent (Tier 3)
-    "langgraph>=0.2",
-    "anthropic>=0.42",
-
-    # Scheduling & Monitoring (Tier 3)
-    "apscheduler>=3.10",
-
-    # Portfolio Optimization (Tier 3)
-    "cvxpy>=1.5",
 
     # Utils
     "python-dotenv>=1.0",
@@ -72,4 +57,4 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["src*", "app*"]
+include = ["src*"]

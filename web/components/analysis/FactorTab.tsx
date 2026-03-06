@@ -13,7 +13,8 @@ export function FactorTab({ result }: FactorTabProps) {
 
   return (
     <div className="space-y-6">
-      {/* Factor groups */}
+      {/* Factor groups — 3 columns on large screens */}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
       {Object.entries(FACTOR_GROUPS).map(([groupName, factorKeys]) => (
         <div key={groupName} className="glass-card p-5">
           <div
@@ -84,6 +85,7 @@ export function FactorTab({ result }: FactorTabProps) {
           </div>
         </div>
       ))}
+      </div>
 
       {/* Bottom row: Confidence breakdown + Regime */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">

@@ -1,14 +1,19 @@
 """股票資料 API"""
 
-from datetime import date, timedelta
+import time
+from datetime import date
 from fastapi import APIRouter, HTTPException, Query
 
 from src.utils.constants import STOCK_LIST
 from src.db.database import get_stock_prices, upsert_stock_prices
 from src.data.stock_fetcher import StockFetcher
-from api.schemas.stock import StockInfo, StockPrice, FetchRequest
+from api.schemas.stock import StockInfo, FetchRequest
 
 router = APIRouter(prefix="/api/stocks", tags=["stocks"])
+
+# In-memory TTL cache for realtime quotes (5 min)
+_realtime_cache: dict[str, tuple[float, dict]] = {}
+_REALTIME_TTL = 300
 
 
 @router.get("", response_model=list[StockInfo])
@@ -63,8 +68,14 @@ def fetch_data(stock_id: str, req: FetchRequest):
 
 @router.get("/{stock_id}/realtime")
 def get_realtime(stock_id: str):
-    """即時報價"""
+    """即時報價 — 5 分鐘 in-memory cache"""
+    now = time.time()
+    cached = _realtime_cache.get(stock_id)
+    if cached and now - cached[0] < _REALTIME_TTL:
+        return cached[1]
+
     result = StockFetcher.fetch_realtime(stock_id)
     if result is None:
         raise HTTPException(503, "無法取得即時報價")
+    _realtime_cache[stock_id] = (now, result)
     return result

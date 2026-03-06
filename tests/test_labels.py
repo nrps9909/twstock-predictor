@@ -34,7 +34,9 @@ class TestComputeATR:
         assert (valid > 0).all()
 
     def test_atr_nan_warmup(self, price_df):
-        atr = compute_atr(price_df["high"], price_df["low"], price_df["close"], window=14)
+        atr = compute_atr(
+            price_df["high"], price_df["low"], price_df["close"], window=14
+        )
         assert atr.iloc[:13].isna().all()
         assert atr.iloc[13:].notna().all()
 
@@ -66,7 +68,9 @@ class TestTripleBarrierLabel:
 
     def test_label_range_bounded(self, price_df):
         """標籤值應該在合理範圍內"""
-        labels = triple_barrier_label(price_df, upper_multiplier=2.0, lower_multiplier=2.0)
+        labels = triple_barrier_label(
+            price_df, upper_multiplier=2.0, lower_multiplier=2.0
+        )
         valid = labels.dropna()
         # 報酬率不應超過 ±50%（短期內）
         assert valid.abs().max() < 0.5
@@ -109,15 +113,19 @@ class TestSampleWeights:
         """重疊越多的區域權重應越低"""
         # 全部相鄰標籤都有效 → 高重疊 → 低權重
         n = 50
-        df = pd.DataFrame({
-            "tb_label": np.random.normal(0, 0.01, n),
-        })
+        df = pd.DataFrame(
+            {
+                "tb_label": np.random.normal(0, 0.01, n),
+            }
+        )
         weights_dense = compute_sample_weights(df, max_holding=10)
 
         # 稀疏標籤（每隔 15 天一個有效標籤）
-        df_sparse = pd.DataFrame({
-            "tb_label": [np.nan] * n,
-        })
+        df_sparse = pd.DataFrame(
+            {
+                "tb_label": [np.nan] * n,
+            }
+        )
         for i in range(0, n, 15):
             df_sparse.loc[i, "tb_label"] = 0.01
         weights_sparse = compute_sample_weights(df_sparse, max_holding=10)

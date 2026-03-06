@@ -52,13 +52,17 @@ class RetrainTrigger:
 
         # 2. 滾動 Sharpe
         if rolling_sharpe is not None and rolling_sharpe < self.sharpe_threshold:
-            reasons.append(f"滾動 Sharpe={rolling_sharpe:.2f} < {self.sharpe_threshold}")
+            reasons.append(
+                f"滾動 Sharpe={rolling_sharpe:.2f} < {self.sharpe_threshold}"
+            )
 
         # 3. 距上次訓練天數
         if self.last_train_date is not None:
             days_since = (date.today() - self.last_train_date).days
             if days_since > self.max_days_since_train:
-                reasons.append(f"距上次訓練 {days_since} 天 > {self.max_days_since_train}")
+                reasons.append(
+                    f"距上次訓練 {days_since} 天 > {self.max_days_since_train}"
+                )
 
         # 4. HMM 行情轉場
         if regime_transition is not None and regime_transition.severity > 0.7:

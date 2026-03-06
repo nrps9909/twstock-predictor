@@ -22,6 +22,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class SentimentScore:
     """單篇文章情緒評分"""
+
     label: str  # "bullish", "bearish", "neutral"
     score: float  # -1.0 ~ 1.0
     keywords: list[str]
@@ -31,6 +32,7 @@ class SentimentScore:
 @dataclass
 class DailySentiment:
     """每日聚合情緒"""
+
     date: date
     avg_score: float
     post_count: int
@@ -77,7 +79,9 @@ class SentimentAnalyzer:
 
         try:
             if self.provider == "anthropic":
-                content = call_claude_sync(prompt, model="claude-sonnet-4-6", timeout=30)
+                content = call_claude_sync(
+                    prompt, model="claude-sonnet-4-6", timeout=30
+                )
             else:
                 resp = self.client.post(
                     self.api_url,
@@ -111,12 +115,38 @@ class SentimentAnalyzer:
     def _rule_based_analysis(self, text: str) -> SentimentScore:
         """基於規則的簡易情緒分析（備用方案）"""
         bullish_words = [
-            "利多", "看多", "看漲", "上漲", "突破", "創新高", "買進", "加碼",
-            "營收成長", "獲利", "紅包", "噴", "飆", "強勢", "多頭",
+            "利多",
+            "看多",
+            "看漲",
+            "上漲",
+            "突破",
+            "創新高",
+            "買進",
+            "加碼",
+            "營收成長",
+            "獲利",
+            "紅包",
+            "噴",
+            "飆",
+            "強勢",
+            "多頭",
         ]
         bearish_words = [
-            "利空", "看空", "看跌", "下跌", "跌破", "崩", "賣出", "減碼",
-            "營收衰退", "虧損", "套牢", "弱勢", "空頭", "砍", "出貨",
+            "利空",
+            "看空",
+            "看跌",
+            "下跌",
+            "跌破",
+            "崩",
+            "賣出",
+            "減碼",
+            "營收衰退",
+            "虧損",
+            "套牢",
+            "弱勢",
+            "空頭",
+            "砍",
+            "出貨",
         ]
 
         bull_count = sum(1 for w in bullish_words if w in text)
@@ -139,9 +169,7 @@ class SentimentAnalyzer:
 
     # ── 每日聚合 ────────────────────────────────────────
 
-    def aggregate_daily(
-        self, scores: list[dict], target_date: date
-    ) -> DailySentiment:
+    def aggregate_daily(self, scores: list[dict], target_date: date) -> DailySentiment:
         """將多篇文章的情緒分數聚合為每日情緒
 
         Args:

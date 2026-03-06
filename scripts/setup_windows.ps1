@@ -70,48 +70,23 @@ uv venv --python 3.12
 uv pip install -e ".[dev,analysis]"
 Write-Host "[OK] 依賴安裝完成" -ForegroundColor Green
 
-# ── 5. 建立 .streamlit 設定 ──────────────────────────────
-$streamlitDir = Join-Path $TARGET ".streamlit"
-if (-not (Test-Path $streamlitDir)) {
-    New-Item -ItemType Directory -Path $streamlitDir | Out-Null
-}
-$configFile = Join-Path $streamlitDir "config.toml"
-if (-not (Test-Path $configFile)) {
-    @"
-[theme]
-base = "dark"
-primaryColor = "#D4A017"
-backgroundColor = "#0B0F19"
-secondaryBackgroundColor = "#131825"
-textColor = "#E2E4E9"
-font = "sans serif"
-
-[server]
-headless = true
-
-[browser]
-gatherUsageStats = false
-"@ | Set-Content $configFile -Encoding UTF8
-    Write-Host "[OK] .streamlit/config.toml 已建立" -ForegroundColor Green
-}
-
-# ── 6. 建立 .env（如果不存在）─────────────────────────────
+# ── 5. 建立 .env（如果不存在）─────────────────────────────
 $envFile = Join-Path $TARGET ".env"
 if (-not (Test-Path $envFile)) {
     Copy-Item (Join-Path $TARGET ".env.example") $envFile
     Write-Host "[WARN] 已建立 .env，請填入 API Keys" -ForegroundColor Yellow
 }
 
-# ── 7. 建立 data 目錄 ───────────────────────────────────
+# ── 6. 建立 data 目錄 ───────────────────────────────────
 $dataDir = Join-Path $TARGET "data"
 if (-not (Test-Path $dataDir)) {
     New-Item -ItemType Directory -Path $dataDir | Out-Null
 }
 
-# ── 8. 驗證 ─────────────────────────────────────────────
+# ── 7. 驗證 ─────────────────────────────────────────────
 Write-Host ""
 Write-Host "=== 驗證安裝 ===" -ForegroundColor Cyan
-& (Join-Path $TARGET ".venv\Scripts\python.exe") -c "import streamlit; import torch; import xgboost; print(f'streamlit={streamlit.__version__}, torch={torch.__version__}, xgboost={xgboost.__version__}')"
+& (Join-Path $TARGET ".venv\Scripts\python.exe") -c "import torch; import xgboost; print(f'torch={torch.__version__}, xgboost={xgboost.__version__}')"
 
 Write-Host ""
 Write-Host "=== 設定完成！===" -ForegroundColor Green
@@ -120,9 +95,10 @@ Write-Host "後續步驟:" -ForegroundColor Cyan
 Write-Host "  1. 編輯 .env 填入 API Keys:" -ForegroundColor White
 Write-Host "     notepad $envFile" -ForegroundColor Gray
 Write-Host ""
-Write-Host "  2. 啟動 Streamlit:" -ForegroundColor White
-Write-Host "     cd $TARGET" -ForegroundColor Gray
-Write-Host "     .venv\Scripts\streamlit run app\main.py --server.port 8501" -ForegroundColor Gray
+Write-Host "  2. 啟動前端 (Next.js):" -ForegroundColor White
+Write-Host "     cd $TARGET\web" -ForegroundColor Gray
+Write-Host "     npm install" -ForegroundColor Gray
+Write-Host "     npm run dev" -ForegroundColor Gray
 Write-Host ""
 Write-Host "  3. 執行測試:" -ForegroundColor White
 Write-Host "     .venv\Scripts\python -m pytest tests\ -v" -ForegroundColor Gray

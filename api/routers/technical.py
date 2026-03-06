@@ -35,26 +35,57 @@ def get_technical(
 
     latest = df_recent.iloc[-1]
     indicators = {}
-    for col in ["rsi_14", "kd_k", "kd_d", "macd", "macd_signal", "macd_hist",
-                 "sma_5", "sma_20", "sma_60", "bb_upper", "bb_lower", "bb_middle",
-                 "adx", "bias_10", "bb_pband", "obv"]:
+    for col in [
+        "rsi_14",
+        "kd_k",
+        "kd_d",
+        "macd",
+        "macd_signal",
+        "macd_hist",
+        "sma_5",
+        "sma_20",
+        "sma_60",
+        "bb_upper",
+        "bb_lower",
+        "bb_middle",
+        "adx",
+        "bias_10",
+        "bb_pband",
+        "obv",
+    ]:
         if col in latest.index:
             val = latest[col]
-            indicators[col] = None if (val != val) else round(float(val), 4)  # NaN check
+            indicators[col] = (
+                None if (val != val) else round(float(val), 4)
+            )  # NaN check
 
     # 圖表資料
     chart_data = []
     for _, row in df_recent.iterrows():
         d = {
-            "date": row["date"].isoformat() if isinstance(row["date"], date) else str(row["date"]),
+            "date": row["date"].isoformat()
+            if isinstance(row["date"], date)
+            else str(row["date"]),
             "open": row.get("open"),
             "high": row.get("high"),
             "low": row.get("low"),
             "close": row.get("close"),
             "volume": row.get("volume"),
         }
-        for col in ["sma_5", "sma_20", "sma_60", "kd_k", "kd_d", "rsi_14",
-                     "macd", "macd_signal", "macd_hist", "bb_upper", "bb_lower", "bb_middle"]:
+        for col in [
+            "sma_5",
+            "sma_20",
+            "sma_60",
+            "kd_k",
+            "kd_d",
+            "rsi_14",
+            "macd",
+            "macd_signal",
+            "macd_hist",
+            "bb_upper",
+            "bb_lower",
+            "bb_middle",
+        ]:
             if col in row.index:
                 val = row[col]
                 d[col] = None if (val != val) else round(float(val), 4)

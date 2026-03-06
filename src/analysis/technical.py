@@ -16,7 +16,6 @@ Note: 相容 ta 0.5.x (n=) 和 ta 0.7+ (window=)
 import inspect as _inspect
 
 import pandas as pd
-import numpy as np
 from ta.trend import SMAIndicator, EMAIndicator, MACD, ADXIndicator
 from ta.momentum import StochasticOscillator, RSIIndicator
 from ta.volatility import BollingerBands
@@ -62,26 +61,32 @@ class TechnicalAnalyzer:
         # ── KD 隨機指標 ─────────────────────────────────
         kd_kw = (
             {"window": self.params["kd_window"], "smooth_window": 3}
-            if _USE_WINDOW else
-            {"n": self.params["kd_window"], "d_n": 3}
+            if _USE_WINDOW
+            else {"n": self.params["kd_window"], "d_n": 3}
         )
         kd = StochasticOscillator(high=high, low=low, close=close, **kd_kw)
         df["kd_k"] = kd.stoch()
         df["kd_d"] = kd.stoch_signal()
 
         # ── RSI 相對強弱指標 ─────────────────────────────
-        rsi = RSIIndicator(close=close, **{"window" if _USE_WINDOW else "n": self.params["rsi_window"]})
+        rsi = RSIIndicator(
+            close=close, **{"window" if _USE_WINDOW else "n": self.params["rsi_window"]}
+        )
         df["rsi_14"] = rsi.rsi()
 
         # ── MACD ─────────────────────────────────────────
         macd_kw = (
-            {"window_fast": self.params["macd_fast"],
-             "window_slow": self.params["macd_slow"],
-             "window_sign": self.params["macd_signal"]}
-            if _USE_WINDOW else
-            {"n_fast": self.params["macd_fast"],
-             "n_slow": self.params["macd_slow"],
-             "n_sign": self.params["macd_signal"]}
+            {
+                "window_fast": self.params["macd_fast"],
+                "window_slow": self.params["macd_slow"],
+                "window_sign": self.params["macd_signal"],
+            }
+            if _USE_WINDOW
+            else {
+                "n_fast": self.params["macd_fast"],
+                "n_slow": self.params["macd_slow"],
+                "n_sign": self.params["macd_signal"],
+            }
         )
         macd = MACD(close=close, **macd_kw)
         df["macd"] = macd.macd()
@@ -90,11 +95,15 @@ class TechnicalAnalyzer:
 
         # ── 乖離率 BIAS ─────────────────────────────────
         for w in self.params["bias_windows"]:
-            sma_w = SMAIndicator(close=close, **{"window" if _USE_WINDOW else "n": w}).sma_indicator()
+            sma_w = SMAIndicator(
+                close=close, **{"window" if _USE_WINDOW else "n": w}
+            ).sma_indicator()
             df[f"bias_{w}"] = ((close - sma_w) / sma_w) * 100
 
         # ── 布林通道 Bollinger Bands ────────────────────
-        bb = BollingerBands(close=close, **{"window" if _USE_WINDOW else "n": self.params["bb_window"]})
+        bb = BollingerBands(
+            close=close, **{"window" if _USE_WINDOW else "n": self.params["bb_window"]}
+        )
         df["bb_upper"] = bb.bollinger_hband()
         df["bb_middle"] = bb.bollinger_mavg()
         df["bb_lower"] = bb.bollinger_lband()
@@ -107,7 +116,9 @@ class TechnicalAnalyzer:
 
         # ── DMI / ADX 趨向指標 ──────────────────────────
         adx = ADXIndicator(
-            high=high, low=low, close=close,
+            high=high,
+            low=low,
+            close=close,
             **{"window" if _USE_WINDOW else "n": self.params["adx_window"]},
         )
         df["adx"] = adx.adx()
@@ -144,10 +155,16 @@ class TechnicalAnalyzer:
         # KD 訊號 (含漸進式評分)
         k, d = latest.get("kd_k", 50), latest.get("kd_d", 50)
         if k < 20 and d < 20:
-            signals["kd"] = {"signal": "buy", "reason": f"KD 超賣區 (K={k:.1f}, D={d:.1f})"}
+            signals["kd"] = {
+                "signal": "buy",
+                "reason": f"KD 超賣區 (K={k:.1f}, D={d:.1f})",
+            }
             score += 1
         elif k > 80 and d > 80:
-            signals["kd"] = {"signal": "sell", "reason": f"KD 超買區 (K={k:.1f}, D={d:.1f})"}
+            signals["kd"] = {
+                "signal": "sell",
+                "reason": f"KD 超買區 (K={k:.1f}, D={d:.1f})",
+            }
             score -= 1
         elif len(df) >= 2 and df.iloc[-2]["kd_k"] < df.iloc[-2]["kd_d"] and k > d:
             signals["kd"] = {"signal": "buy", "reason": "KD 黃金交叉"}
@@ -156,19 +173,34 @@ class TechnicalAnalyzer:
             signals["kd"] = {"signal": "sell", "reason": "KD 死亡交叉"}
             score -= 1
         elif k < 30:
-            signals["kd"] = {"signal": "weak_buy", "reason": f"KD 偏低 (K={k:.1f}, D={d:.1f})"}
+            signals["kd"] = {
+                "signal": "weak_buy",
+                "reason": f"KD 偏低 (K={k:.1f}, D={d:.1f})",
+            }
             score += 0.5
         elif k > 70:
-            signals["kd"] = {"signal": "weak_sell", "reason": f"KD 偏高 (K={k:.1f}, D={d:.1f})"}
+            signals["kd"] = {
+                "signal": "weak_sell",
+                "reason": f"KD 偏高 (K={k:.1f}, D={d:.1f})",
+            }
             score -= 0.5
         elif k > d and (k - d) > 5:
-            signals["kd"] = {"signal": "weak_buy", "reason": f"K 在 D 上方 (K={k:.1f}, D={d:.1f})"}
+            signals["kd"] = {
+                "signal": "weak_buy",
+                "reason": f"K 在 D 上方 (K={k:.1f}, D={d:.1f})",
+            }
             score += 0.3
         elif d > k and (d - k) > 5:
-            signals["kd"] = {"signal": "weak_sell", "reason": f"D 在 K 上方 (K={k:.1f}, D={d:.1f})"}
+            signals["kd"] = {
+                "signal": "weak_sell",
+                "reason": f"D 在 K 上方 (K={k:.1f}, D={d:.1f})",
+            }
             score -= 0.3
         else:
-            signals["kd"] = {"signal": "neutral", "reason": f"KD 中性 (K={k:.1f}, D={d:.1f})"}
+            signals["kd"] = {
+                "signal": "neutral",
+                "reason": f"KD 中性 (K={k:.1f}, D={d:.1f})",
+            }
 
         # RSI 訊號 (含漸進式評分)
         rsi_val = latest.get("rsi_14", 50)
@@ -179,13 +211,22 @@ class TechnicalAnalyzer:
             signals["rsi"] = {"signal": "sell", "reason": f"RSI 超買 ({rsi_val:.1f})"}
             score -= 1
         elif rsi_val < 40:
-            signals["rsi"] = {"signal": "weak_buy", "reason": f"RSI 偏低 ({rsi_val:.1f})"}
+            signals["rsi"] = {
+                "signal": "weak_buy",
+                "reason": f"RSI 偏低 ({rsi_val:.1f})",
+            }
             score += 0.5
         elif rsi_val > 60:
-            signals["rsi"] = {"signal": "weak_sell", "reason": f"RSI 偏高 ({rsi_val:.1f})"}
+            signals["rsi"] = {
+                "signal": "weak_sell",
+                "reason": f"RSI 偏高 ({rsi_val:.1f})",
+            }
             score -= 0.5
         else:
-            signals["rsi"] = {"signal": "neutral", "reason": f"RSI 中性 ({rsi_val:.1f})"}
+            signals["rsi"] = {
+                "signal": "neutral",
+                "reason": f"RSI 中性 ({rsi_val:.1f})",
+            }
 
         # MACD 訊號 (含動能方向評分)
         macd_val = latest.get("macd", 0)
@@ -194,40 +235,73 @@ class TechnicalAnalyzer:
         if len(df) >= 2:
             prev_hist = df.iloc[-2].get("macd_hist", 0)
             if prev_hist < 0 and macd_hist > 0:
-                signals["macd"] = {"signal": "buy", "reason": "MACD 柱狀體翻正（多方動能增強）"}
+                signals["macd"] = {
+                    "signal": "buy",
+                    "reason": "MACD 柱狀體翻正（多方動能增強）",
+                }
                 score += 1
             elif prev_hist > 0 and macd_hist < 0:
-                signals["macd"] = {"signal": "sell", "reason": "MACD 柱狀體翻負（空方動能增強）"}
+                signals["macd"] = {
+                    "signal": "sell",
+                    "reason": "MACD 柱狀體翻負（空方動能增強）",
+                }
                 score -= 1
             elif macd_hist > 0 and macd_hist > prev_hist:
-                signals["macd"] = {"signal": "weak_buy", "reason": "MACD 多方動能增強中"}
+                signals["macd"] = {
+                    "signal": "weak_buy",
+                    "reason": "MACD 多方動能增強中",
+                }
                 score += 0.3
             elif macd_hist < 0 and macd_hist < prev_hist:
-                signals["macd"] = {"signal": "weak_sell", "reason": "MACD 空方動能增強中"}
+                signals["macd"] = {
+                    "signal": "weak_sell",
+                    "reason": "MACD 空方動能增強中",
+                }
                 score -= 0.3
             elif macd_hist > 0:
-                signals["macd"] = {"signal": "neutral", "reason": "MACD 多方持續（動能減弱）"}
+                signals["macd"] = {
+                    "signal": "neutral",
+                    "reason": "MACD 多方持續（動能減弱）",
+                }
             else:
-                signals["macd"] = {"signal": "neutral", "reason": "MACD 空方持續（動能減弱）"}
+                signals["macd"] = {
+                    "signal": "neutral",
+                    "reason": "MACD 空方持續（動能減弱）",
+                }
         else:
             signals["macd"] = {"signal": "neutral", "reason": "MACD 資料不足"}
 
         # 乖離率 BIAS 訊號（以 10日 為主，含漸進式評分）
         bias_10 = latest.get("bias_10", 0)
         if bias_10 < -3:
-            signals["bias"] = {"signal": "buy", "reason": f"10日乖離率過低 ({bias_10:.2f}%)"}
+            signals["bias"] = {
+                "signal": "buy",
+                "reason": f"10日乖離率過低 ({bias_10:.2f}%)",
+            }
             score += 1
         elif bias_10 > 3:
-            signals["bias"] = {"signal": "sell", "reason": f"10日乖離率過高 ({bias_10:.2f}%)"}
+            signals["bias"] = {
+                "signal": "sell",
+                "reason": f"10日乖離率過高 ({bias_10:.2f}%)",
+            }
             score -= 1
         elif bias_10 < -1.5:
-            signals["bias"] = {"signal": "weak_buy", "reason": f"乖離率偏低 ({bias_10:.2f}%)"}
+            signals["bias"] = {
+                "signal": "weak_buy",
+                "reason": f"乖離率偏低 ({bias_10:.2f}%)",
+            }
             score += 0.3
         elif bias_10 > 1.5:
-            signals["bias"] = {"signal": "weak_sell", "reason": f"乖離率偏高 ({bias_10:.2f}%)"}
+            signals["bias"] = {
+                "signal": "weak_sell",
+                "reason": f"乖離率偏高 ({bias_10:.2f}%)",
+            }
             score -= 0.3
         else:
-            signals["bias"] = {"signal": "neutral", "reason": f"乖離率正常 ({bias_10:.2f}%)"}
+            signals["bias"] = {
+                "signal": "neutral",
+                "reason": f"乖離率正常 ({bias_10:.2f}%)",
+            }
 
         # 布林通道 BB 訊號 (含漸進式評分)
         bb_pband = latest.get("bb_pband", 0.5)
@@ -238,13 +312,22 @@ class TechnicalAnalyzer:
             signals["bb"] = {"signal": "sell", "reason": "價格突破布林上軌"}
             score -= 1
         elif bb_pband < 0.15:
-            signals["bb"] = {"signal": "weak_buy", "reason": f"價格接近布林下軌 (%B={bb_pband:.2f})"}
+            signals["bb"] = {
+                "signal": "weak_buy",
+                "reason": f"價格接近布林下軌 (%B={bb_pband:.2f})",
+            }
             score += 0.5
         elif bb_pband > 0.85:
-            signals["bb"] = {"signal": "weak_sell", "reason": f"價格接近布林上軌 (%B={bb_pband:.2f})"}
+            signals["bb"] = {
+                "signal": "weak_sell",
+                "reason": f"價格接近布林上軌 (%B={bb_pband:.2f})",
+            }
             score -= 0.5
         else:
-            signals["bb"] = {"signal": "neutral", "reason": f"布林通道內 (%B={bb_pband:.2f})"}
+            signals["bb"] = {
+                "signal": "neutral",
+                "reason": f"布林通道內 (%B={bb_pband:.2f})",
+            }
 
         # 綜合訊號 (漸進式分數，閾值配合 fractional scores)
         total_indicators = 5

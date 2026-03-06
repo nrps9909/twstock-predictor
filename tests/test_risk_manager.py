@@ -8,8 +8,11 @@ from src.risk.manager import RiskManager, TrailingStopState
 class TestTrailingStopState:
     def test_init(self):
         ts = TrailingStopState(
-            entry_price=100.0, highest_price=100.0,
-            atr=3.0, multiplier=2.5, current_stop=92.5,
+            entry_price=100.0,
+            highest_price=100.0,
+            atr=3.0,
+            multiplier=2.5,
+            current_stop=92.5,
         )
         assert ts.trailing_distance == 7.5
         assert ts.current_stop == 92.5
@@ -17,8 +20,11 @@ class TestTrailingStopState:
 
     def test_update_moves_up(self):
         ts = TrailingStopState(
-            entry_price=100.0, highest_price=100.0,
-            atr=3.0, multiplier=2.0, current_stop=94.0,
+            entry_price=100.0,
+            highest_price=100.0,
+            atr=3.0,
+            multiplier=2.0,
+            current_stop=94.0,
         )
         ts.update(105.0)
         assert ts.highest_price == 105.0
@@ -26,8 +32,11 @@ class TestTrailingStopState:
 
     def test_update_no_down_movement(self):
         ts = TrailingStopState(
-            entry_price=100.0, highest_price=105.0,
-            atr=3.0, multiplier=2.0, current_stop=99.0,
+            entry_price=100.0,
+            highest_price=105.0,
+            atr=3.0,
+            multiplier=2.0,
+            current_stop=99.0,
         )
         # 價格回落不應降低停損
         ts.update(102.0)
@@ -35,8 +44,11 @@ class TestTrailingStopState:
 
     def test_trigger(self):
         ts = TrailingStopState(
-            entry_price=100.0, highest_price=100.0,
-            atr=3.0, multiplier=2.0, current_stop=94.0,
+            entry_price=100.0,
+            highest_price=100.0,
+            atr=3.0,
+            multiplier=2.0,
+            current_stop=94.0,
         )
         assert not ts.check_trigger(95.0)
         assert ts.check_trigger(93.0)

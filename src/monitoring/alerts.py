@@ -8,7 +8,6 @@ from enum import Enum
 
 import httpx
 
-from src.utils.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -97,10 +96,7 @@ class AlertManager:
     ):
         """交易警報"""
         message = (
-            f"交易信號 {stock_id}\n"
-            f"動作: {action}\n"
-            f"價格: {price:.2f}\n"
-            f"理由: {reasoning}"
+            f"交易信號 {stock_id}\n動作: {action}\n價格: {price:.2f}\n理由: {reasoning}"
         )
         await self.send(message, AlertLevel.SIGNAL)
 
@@ -111,11 +107,13 @@ class AlertManager:
     ):
         """回撤警報"""
         message = (
-            f"回撤警報!\n"
-            f"當前回撤: {current_drawdown:.2%}\n"
-            f"允許上限: {max_allowed:.2%}"
+            f"回撤警報!\n當前回撤: {current_drawdown:.2%}\n允許上限: {max_allowed:.2%}"
         )
-        level = AlertLevel.CRITICAL if abs(current_drawdown) > abs(max_allowed) * 0.8 else AlertLevel.WARNING
+        level = (
+            AlertLevel.CRITICAL
+            if abs(current_drawdown) > abs(max_allowed) * 0.8
+            else AlertLevel.WARNING
+        )
         await self.send(message, level)
 
     async def send_system_alert(self, error: str):

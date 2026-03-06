@@ -1,12 +1,14 @@
-"""社群情緒資料收集 — httpx 直接爬取優先，Firecrawl 作為可選 fallback
+"""社群情緒資料收集 — 標題 + 內文分析，農場文過濾
 
-Bug 6 fix: 優先用 LLM 結構化提取（Claude Haiku），regex 作為 fallback
-免費方案：PTT 用 httpx + cookie，鉅亨網用公開 JSON API，Google News RSS，Yahoo TW
+爬取流程：
+1. 從 PTT / 鉅亨網 / Google News / Yahoo TW 收集新聞
+2. 為有連結的文章抓取內文摘要（並行，限制 10 篇）
+3. LLM 分析標題 + 內文 → 情緒 + 可信度（過濾農場標題）
 """
 
-import json
 import logging
 import xml.etree.ElementTree as ET
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime
 from html import unescape
 
@@ -20,7 +22,6 @@ from src.utils.retry import retry_with_backoff
 
 logger = logging.getLogger(__name__)
 
-# User-Agent 避免被擋
 _HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -29,22 +30,13 @@ _HEADERS = {
     ),
 }
 
-# PTT 需要 over18 cookie
 _PTT_COOKIES = {"over18": "1"}
 
-# 鉅亨網公開 API
 CNYES_NEWS_API = "https://api.cnyes.com/media/api/v1/newslist/category/tw_stock"
 
 
 class SentimentCrawler:
-    """社群/論壇情緒資料收集器
-
-    爬取優先順序：
-    1. 直接爬取（httpx + BeautifulSoup，免費）
-    2. Firecrawl fallback（免費額度有限，可選）
-
-    情緒解析：優先使用 LLM 結構化提取（Claude Haiku），regex 作為 fallback
-    """
+    """社群/論壇情緒資料收集器 — 標題 + 內文 + 可信度"""
 
     def __init__(
         self,
@@ -53,74 +45,109 @@ class SentimentCrawler:
         anthropic_api_key: str | None = None,
     ):
         self.firecrawl_key = firecrawl_api_key or settings.FIRECRAWL_API_KEY
-        self.openclaw_url = openclaw_url  # e.g. "http://localhost:3000"
+        self.openclaw_url = openclaw_url
         self.anthropic_key = anthropic_api_key or settings.ANTHROPIC_API_KEY
-        self.client = httpx.Client(
-            timeout=60, headers=_HEADERS, follow_redirects=True
-        )
+        self.client = httpx.Client(timeout=60, headers=_HEADERS, follow_redirects=True)
 
-    # ── 直接爬取（免費） ─────────────────────────────────
+    # ── 網頁爬取 ─────────────────────────────────────────
 
     @retry_with_backoff(max_retries=2, base_delay=1.0)
     def _scrape_direct(self, url: str, cookies: dict | None = None) -> str:
-        """用 httpx + BeautifulSoup 直接抓取網頁主要文字"""
+        """httpx + BeautifulSoup 直接抓取網頁主要文字"""
         resp = self.client.get(url, cookies=cookies)
         resp.raise_for_status()
         soup = BeautifulSoup(resp.text, "html.parser")
-
-        # 移除 script/style/nav
         for tag in soup(["script", "style", "nav", "footer", "header"]):
             tag.decompose()
-
-        # 取 article 或 main，否則取 body
         main = soup.find("article") or soup.find("main") or soup.find("body")
         return main.get_text(separator="\n", strip=True) if main else ""
 
-    # ── Firecrawl fallback ───────────────────────────────
-
     @retry_with_backoff(max_retries=2, base_delay=1.0)
     def _scrape_firecrawl(self, url: str) -> str:
-        """Firecrawl API fallback（免費額度有限）"""
+        """Firecrawl API fallback"""
         if not self.firecrawl_key:
             return ""
-
         resp = self.client.post(
             "https://api.firecrawl.dev/v1/scrape",
             headers={"Authorization": f"Bearer {self.firecrawl_key}"},
-            json={
-                "url": url,
-                "formats": ["markdown"],
-                "onlyMainContent": True,
-            },
+            json={"url": url, "formats": ["markdown"], "onlyMainContent": True},
         )
         resp.raise_for_status()
-        data = resp.json()
-        return data.get("data", {}).get("markdown", "")
+        return resp.json().get("data", {}).get("markdown", "")
 
     def _scrape_with_fallback(self, url: str, cookies: dict | None = None) -> str:
-        """先直接爬取，失敗再 fallback 到 Firecrawl"""
+        """先直接爬取，失敗再 fallback Firecrawl"""
         try:
             content = self._scrape_direct(url, cookies=cookies)
             if content:
                 return content
         except Exception as e:
             logger.warning("直接爬取失敗 (%s): %s", url, e)
-
-        # Firecrawl fallback
         try:
             return self._scrape_firecrawl(url)
         except Exception as e:
             logger.warning("Firecrawl fallback 也失敗 (%s): %s", url, e)
             return ""
 
-    # ── LLM 結構化提取 ─────────────────────────────────
+    # ── 文章內文抓取 ──────────────────────────────────────
+
+    def _fetch_article_summary(self, url: str, max_chars: int = 800) -> str:
+        """抓取單篇文章內文摘要（前 N 字元）"""
+        try:
+            resp = self.client.get(url, timeout=15)
+            resp.raise_for_status()
+            soup = BeautifulSoup(resp.text, "html.parser")
+            for tag in soup(
+                [
+                    "script",
+                    "style",
+                    "nav",
+                    "footer",
+                    "header",
+                    "aside",
+                    "iframe",
+                    "form",
+                ]
+            ):
+                tag.decompose()
+            main = soup.find("article") or soup.find("main") or soup.find("body")
+            if not main:
+                return ""
+            text = main.get_text(separator=" ", strip=True)
+            return " ".join(text.split())[:max_chars]
+        except Exception:
+            return ""
+
+    def _enrich_articles(self, articles: list[dict], max_fetch: int = 10) -> list[dict]:
+        """並行抓取文章內文摘要（限制 N 篇）"""
+        to_fetch = [
+            a for a in articles if a.get("link") and not a.get("content_summary")
+        ][:max_fetch]
+        if not to_fetch:
+            return articles
+
+        def fetch_one(article):
+            content = self._fetch_article_summary(article["link"])
+            if content and len(content) > 50:
+                article["content_summary"] = content
+
+        with ThreadPoolExecutor(max_workers=5) as executor:
+            futures = [executor.submit(fetch_one, a) for a in to_fetch]
+            for future in as_completed(futures, timeout=45):
+                try:
+                    future.result()
+                except Exception:
+                    pass
+
+        enriched = sum(1 for a in articles if a.get("content_summary"))
+        if enriched > 0:
+            logger.info("內文充實: %d/%d 篇文章取得摘要", enriched, len(to_fetch))
+        return articles
+
+    # ── LLM 結構化提取（fallback 用） ─────────────────────
 
     def _extract_with_llm(self, content: str, stock_id: str) -> list[dict]:
-        """Bug 6 fix: 用 Claude Haiku 結構化提取文章與情緒（透過 claude -p CLI）
-
-        Returns:
-            list of {title, sentiment, engagement, date_str}
-        """
+        """用 Claude Haiku 從頁面文字提取文章標題與情緒"""
         stock_name = STOCK_LIST.get(stock_id, stock_id)
         prompt = f"""從以下網頁內容中提取與股票 {stock_id} ({stock_name}) 相關的文章。
 
@@ -139,65 +166,112 @@ class SentimentCrawler:
 {content[:4000]}"""
 
         try:
-            text = call_claude_sync(prompt, model="claude-haiku-4-5-20251001", timeout=90)
+            text = call_claude_sync(
+                prompt, model="claude-haiku-4-5-20251001", timeout=90
+            )
             return parse_json_response(text)
         except Exception as e:
             logger.warning("LLM 提取失敗，將使用 regex fallback: %s", e)
             return []
 
-    # ── OpenClaw 模式 ───────────────────────────────────
+    # ── OpenClaw ──────────────────────────────────────────
 
     def _query_openclaw(self, stock_id: str) -> list[dict]:
-        """透過 OpenClaw Gateway 執行情緒爬蟲 skill"""
         if not self.openclaw_url:
-            logger.warning("未設定 OpenClaw URL")
             return []
-
         try:
             resp = self.client.post(
                 f"{self.openclaw_url}/api/chat",
                 json={
-                    "message": f"分析 {stock_id} {STOCK_LIST.get(stock_id, '')} 的市場情緒",
+                    "message": f"分析 {stock_id} {STOCK_LIST.get(stock_id, '')} 的市場情緒"
                 },
             )
             resp.raise_for_status()
-            data = resp.json()
-            return data.get("sentiment_data", [])
+            return resp.json().get("sentiment_data", [])
         except Exception as e:
             logger.error("OpenClaw 查詢失敗: %s", e)
             return []
 
-    # ── PTT 爬蟲 ────────────────────────────────────────
+    # ── PTT 爬蟲 ──────────────────────────────────────────
 
     def crawl_ptt(self, stock_id: str) -> list[dict]:
-        """爬取 PTT 股票板相關文章（直接爬取，帶 over18 cookie）"""
+        """爬取 PTT 股票板 — 優先 HTML 解析取得連結，fallback LLM"""
         stock_name = STOCK_LIST.get(stock_id, stock_id)
         search_url = SENTIMENT_SOURCES["ptt_stock"]["search_url"].format(stock_name)
 
-        content = self._scrape_with_fallback(search_url, cookies=_PTT_COOKIES)
+        # 方法1: 直接 HTML 爬取（保留連結）
+        try:
+            resp = self.client.get(search_url, cookies=_PTT_COOKIES, timeout=15)
+            resp.raise_for_status()
+            articles = self._parse_ptt_html(resp.text, stock_id)
+            if articles:
+                return articles
+        except Exception as e:
+            logger.warning("PTT 直接爬取失敗: %s", e)
+
+        # 方法2: Firecrawl + LLM fallback（無連結）
+        content = ""
+        try:
+            content = self._scrape_firecrawl(search_url)
+        except Exception:
+            pass
         if not content:
             return []
 
-        # 優先使用 LLM 結構化提取
         llm_results = self._extract_with_llm(content, stock_id)
         if llm_results:
-            articles = []
-            for item in llm_results:
-                articles.append({
+            return [
+                {
                     "stock_id": stock_id,
                     "source": "ptt",
                     "title": item.get("title", ""),
                     "sentiment_label": item.get("sentiment", "neutral"),
                     "date": date.today(),
                     "engagement": item.get("engagement", 0),
-                })
-            return articles
+                }
+                for item in llm_results
+            ]
 
-        # Fallback: regex 解析
         return self._parse_ptt_content(content, stock_id)
 
+    def _parse_ptt_html(self, html: str, stock_id: str) -> list[dict]:
+        """從 PTT HTML 解析文章標題、連結、推文數"""
+        soup = BeautifulSoup(html, "html.parser")
+        articles = []
+        for div in soup.select("div.r-ent"):
+            title_el = div.select_one("div.title a")
+            if not title_el:
+                continue
+            title = title_el.get_text(strip=True)
+            href = title_el.get("href", "")
+            link = f"https://www.ptt.cc{href}" if href else ""
+
+            push_el = div.select_one("div.nrec span")
+            engagement = 0
+            if push_el:
+                push_text = push_el.get_text(strip=True)
+                if push_text == "爆":
+                    engagement = 99
+                elif push_text == "XX":
+                    engagement = -99
+                elif push_text.lstrip("-").isdigit():
+                    engagement = int(push_text)
+
+            articles.append(
+                {
+                    "stock_id": stock_id,
+                    "source": "ptt",
+                    "title": title[:200],
+                    "link": link,
+                    "sentiment_label": "neutral",
+                    "date": date.today(),
+                    "engagement": engagement,
+                }
+            )
+        return articles[:15]
+
     def _parse_ptt_content(self, content: str, stock_id: str) -> list[dict]:
-        """解析 PTT 文字內容，提取文章資訊（fallback regex）"""
+        """Fallback: 從純文字解析 PTT 文章"""
         articles = []
         lines = content.split("\n")
         current_article = {}
@@ -216,9 +290,7 @@ class SentimentCrawler:
             if line.startswith("#") or line.startswith("["):
                 current_article["title"] = line.lstrip("#[] ")
             elif "推" in line or "噓" in line:
-                push_count = line.count("推")
-                boo_count = line.count("噓")
-                current_article["engagement"] = push_count + boo_count
+                current_article["engagement"] = line.count("推") + line.count("噓")
 
         if current_article.get("title"):
             current_article["stock_id"] = stock_id
@@ -228,94 +300,101 @@ class SentimentCrawler:
 
         return articles
 
-    # ── 鉅亨網爬蟲 ──────────────────────────────────────
+    # ── 鉅亨網爬蟲 ────────────────────────────────────────
 
     def crawl_cnyes(self, stock_id: str) -> list[dict]:
-        """爬取鉅亨網個股新聞（優先用公開 JSON API）"""
-        # 先嘗試 JSON API
+        """爬取鉅亨網個股新聞"""
         try:
             return self._fetch_cnyes_api(stock_id)
         except Exception as e:
             logger.warning("鉅亨網 API 失敗，改用 HTML 爬取: %s", e)
 
-        # Fallback: HTML 爬取
         url = SENTIMENT_SOURCES["cnyes"]["stock_url"].format(stock_id)
         content = self._scrape_with_fallback(url)
         if not content:
             return []
 
-        # 優先使用 LLM 結構化提取
         llm_results = self._extract_with_llm(content, stock_id)
         if llm_results:
-            articles = []
-            for item in llm_results:
-                articles.append({
+            return [
+                {
                     "stock_id": stock_id,
                     "source": "cnyes",
                     "title": item.get("title", ""),
                     "sentiment_label": item.get("sentiment", "neutral"),
                     "date": date.today(),
                     "engagement": item.get("engagement", 0),
-                })
-            return articles
+                }
+                for item in llm_results
+            ]
 
-        # Fallback: 簡單字串匹配
-        articles = []
-        lines = content.split("\n")
-        for line in lines:
-            line = line.strip()
-            if len(line) > 10 and any(
-                kw in line for kw in [stock_id, STOCK_LIST.get(stock_id, "")]
-            ):
-                articles.append({
-                    "stock_id": stock_id,
-                    "source": "cnyes",
-                    "title": line[:200],
-                    "date": date.today(),
-                    "engagement": 0,
-                })
-
-        return articles
+        stock_name = STOCK_LIST.get(stock_id, "")
+        return [
+            {
+                "stock_id": stock_id,
+                "source": "cnyes",
+                "title": line.strip()[:200],
+                "date": date.today(),
+                "engagement": 0,
+            }
+            for line in content.split("\n")
+            if len(line.strip()) > 10
+            and any(kw in line for kw in [stock_id, stock_name])
+        ]
 
     @retry_with_backoff(max_retries=2, base_delay=1.0)
     def _fetch_cnyes_api(self, stock_id: str, limit: int = 20) -> list[dict]:
-        """透過鉅亨網公開 JSON API 取得新聞"""
-        resp = self.client.get(
-            CNYES_NEWS_API,
-            params={"limit": limit},
-        )
+        """鉅亨網 JSON API — 寬鬆過濾 + 摘要 + 連結"""
+        stock_name = STOCK_LIST.get(stock_id, "")
+
+        # 多抓一些，因為要過濾出相關文章
+        resp = self.client.get(CNYES_NEWS_API, params={"limit": limit * 3})
         resp.raise_for_status()
         data = resp.json()
 
-        stock_name = STOCK_LIST.get(stock_id, "")
         articles = []
         items = data.get("items", {}).get("data", [])
         for item in items:
             title = item.get("title", "")
-            if stock_id not in title and stock_name not in title:
+            summary = item.get("summary", "") or ""
+            news_id = item.get("newsId", "")
+
+            # 寬鬆過濾: 標題或摘要中包含股票代號或名稱
+            check_text = f"{title} {summary}"
+            if stock_id not in check_text and stock_name not in check_text:
                 continue
+
             pub_at = item.get("publishAt", 0)
             news_date = (
                 datetime.fromtimestamp(pub_at).date() if pub_at else date.today()
             )
-            articles.append({
-                "stock_id": stock_id,
-                "source": "cnyes",
-                "title": title[:200],
-                "sentiment_label": "neutral",
-                "date": news_date,
-                "engagement": 0,
-            })
-        return articles
+            link = f"https://news.cnyes.com/news/id/{news_id}" if news_id else ""
 
-    # ── Google News RSS 爬蟲 ────────────────────────────
+            articles.append(
+                {
+                    "stock_id": stock_id,
+                    "source": "cnyes",
+                    "title": title[:200],
+                    "content_summary": summary[:500] if summary else "",
+                    "link": link,
+                    "sentiment_label": "neutral",
+                    "date": news_date,
+                    "engagement": 0,
+                }
+            )
+        return articles[:limit]
+
+    # ── Google News RSS ──────────────────────────────────
 
     @retry_with_backoff(max_retries=2, base_delay=1.0)
     def crawl_google_news(self, stock_id: str) -> list[dict]:
-        """透過 Google News RSS 取得相關新聞（免費、無需 API key）"""
+        """Google News RSS — 標題 + 連結（內文由 enrichment 補充）"""
         stock_name = STOCK_LIST.get(stock_id, stock_id)
         query = f"{stock_id} {stock_name}"
-        rss_url = f"https://news.google.com/rss/search?q={query}&hl=zh-TW&gl=TW&ceid=TW:zh-Hant"
+        rss_url = (
+            f"https://news.google.com/rss/search?q={query}"
+            f"&hl=zh-TW&gl=TW&ceid=TW:zh-Hant"
+        )
 
         try:
             resp = self.client.get(rss_url)
@@ -327,60 +406,89 @@ class SentimentCrawler:
         articles = []
         try:
             root = ET.fromstring(resp.text)
-            items = root.findall(".//item")
-            for item in items[:20]:
+            for item in root.findall(".//item")[:20]:
                 title_el = item.find("title")
                 pub_date_el = item.find("pubDate")
-                title = unescape(title_el.text) if title_el is not None and title_el.text else ""
+                link_el = item.find("link")
+                source_el = item.find("source")
+
+                title = (
+                    unescape(title_el.text)
+                    if title_el is not None and title_el.text
+                    else ""
+                )
                 if not title:
                     continue
+
+                # 優先用 source url（直接連結），否則用 Google redirect
+                link = ""
+                if source_el is not None and source_el.get("url"):
+                    link = source_el.get("url")
+                elif link_el is not None:
+                    link = (link_el.text or link_el.tail or "").strip()
 
                 news_date = date.today()
                 if pub_date_el is not None and pub_date_el.text:
                     try:
-                        dt = datetime.strptime(pub_date_el.text[:25].strip(), "%a, %d %b %Y %H:%M:%S")
+                        dt = datetime.strptime(
+                            pub_date_el.text[:25].strip(),
+                            "%a, %d %b %Y %H:%M:%S",
+                        )
                         news_date = dt.date()
                     except (ValueError, TypeError):
                         pass
 
-                articles.append({
-                    "stock_id": stock_id,
-                    "source": "google_news",
-                    "title": title[:200],
-                    "sentiment_label": "neutral",
-                    "date": news_date,
-                    "engagement": 0,
-                })
+                articles.append(
+                    {
+                        "stock_id": stock_id,
+                        "source": "google_news",
+                        "title": title[:200],
+                        "link": link,
+                        "sentiment_label": "neutral",
+                        "date": news_date,
+                        "engagement": 0,
+                    }
+                )
         except ET.ParseError as e:
             logger.warning("Google News RSS XML 解析失敗: %s", e)
 
         return articles
 
-    # ── Yahoo Finance TW 爬蟲 ─────────────────────────
+    # ── Yahoo Finance TW ─────────────────────────────────
 
     @retry_with_backoff(max_retries=2, base_delay=1.0)
     def crawl_yahoo_tw(self, stock_id: str) -> list[dict]:
-        """爬取 Yahoo Finance TW 個股新聞"""
+        """Yahoo Finance TW — 優先 HTML 解析取得連結"""
         url = f"https://tw.stock.yahoo.com/quote/{stock_id}.TW/news"
 
+        # 方法1: 直接 HTML 解析（保留連結）
+        try:
+            resp = self.client.get(url, timeout=15)
+            resp.raise_for_status()
+            articles = self._parse_yahoo_html(resp.text, stock_id)
+            if articles:
+                return articles
+        except Exception as e:
+            logger.warning("Yahoo TW 直接解析失敗: %s", e)
+
+        # 方法2: Firecrawl + LLM fallback
         content = self._scrape_with_fallback(url)
         if not content:
             return []
 
-        # 優先使用 LLM 結構化提取
         llm_results = self._extract_with_llm(content, stock_id)
         if llm_results:
-            articles = []
-            for item in llm_results:
-                articles.append({
+            return [
+                {
                     "stock_id": stock_id,
                     "source": "yahoo_tw",
                     "title": item.get("title", ""),
                     "sentiment_label": item.get("sentiment", "neutral"),
                     "date": date.today(),
                     "engagement": item.get("engagement", 0),
-                })
-            return articles
+                }
+                for item in llm_results
+            ]
 
         # Fallback: 關鍵字匹配
         stock_name = STOCK_LIST.get(stock_id, "")
@@ -388,25 +496,50 @@ class SentimentCrawler:
         for line in content.split("\n"):
             line = line.strip()
             if len(line) > 10 and any(kw in line for kw in [stock_id, stock_name]):
-                articles.append({
+                articles.append(
+                    {
+                        "stock_id": stock_id,
+                        "source": "yahoo_tw",
+                        "title": line[:200],
+                        "sentiment_label": "neutral",
+                        "date": date.today(),
+                        "engagement": 0,
+                    }
+                )
+        return articles[:15]
+
+    def _parse_yahoo_html(self, html: str, stock_id: str) -> list[dict]:
+        """從 Yahoo TW HTML 解析新聞連結"""
+        soup = BeautifulSoup(html, "html.parser")
+        articles = []
+        seen = set()
+        for a_tag in soup.select("a[href*='/news/']"):
+            title = a_tag.get_text(strip=True)
+            if not title or len(title) < 8 or title in seen:
+                continue
+            seen.add(title)
+            href = a_tag.get("href", "")
+            if href.startswith("/"):
+                href = f"https://tw.stock.yahoo.com{href}"
+
+            articles.append(
+                {
                     "stock_id": stock_id,
                     "source": "yahoo_tw",
-                    "title": line[:200],
+                    "title": title[:200],
+                    "link": href,
                     "sentiment_label": "neutral",
                     "date": date.today(),
                     "engagement": 0,
-                })
+                }
+            )
         return articles[:15]
 
-    # ── 全球半導體/宏觀 context ──────────────────────
+    # ── 全球 context ─────────────────────────────────────
 
     @retry_with_backoff(max_retries=2, base_delay=1.0)
     def crawl_global_context(self, stock_id: str) -> list[str]:
-        """抓取半導體/AI/宏觀新聞標題，供 LLM 分析全球 context
-
-        Returns:
-            list of headline strings (English + Chinese)
-        """
+        """抓取半導體/AI/宏觀新聞標題"""
         queries = [
             "semiconductor+AI+chip",
             "TSMC+台積電",
@@ -430,23 +563,17 @@ class SentimentCrawler:
         logger.info("全球 context: 取得 %d 則標題", len(headlines))
         return headlines
 
-    # ── 整合爬蟲 ────────────────────────────────────────
+    # ── 整合爬蟲 ──────────────────────────────────────────
 
     def crawl_all(self, stock_id: str) -> list[dict]:
-        """爬取所有平台的情緒資料
-
-        Returns:
-            list of {stock_id, source, title, content_summary, date, engagement}
-        """
+        """爬取所有平台 → 內文充實 → 回傳含 content_summary 的文章"""
         all_articles = []
 
-        # 嘗試 OpenClaw 模式
         if self.openclaw_url:
             openclaw_data = self._query_openclaw(stock_id)
             if openclaw_data:
                 return openclaw_data
 
-        # 直接爬取模式（免費優先）
         logger.info("使用直接爬取模式收集 %s 情緒資料", stock_id)
 
         ptt_articles = self.crawl_ptt(stock_id)
@@ -464,5 +591,9 @@ class SentimentCrawler:
         yahoo_articles = self.crawl_yahoo_tw(stock_id)
         all_articles.extend(yahoo_articles)
         logger.info("Yahoo TW: 取得 %d 篇文章", len(yahoo_articles))
+
+        # 內文充實: 為有連結的文章抓取內文摘要
+        if all_articles:
+            all_articles = self._enrich_articles(all_articles, max_fetch=10)
 
         return all_articles

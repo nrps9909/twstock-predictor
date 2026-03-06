@@ -51,19 +51,21 @@ def sample_price_df():
     low = close * (1 - np.abs(np.random.normal(0, 0.01, n)))
     open_ = close * (1 + np.random.normal(0, 0.005, n))
 
-    df = pd.DataFrame({
-        "date": dates,
-        "open": open_,
-        "high": high,
-        "low": low,
-        "close": close,
-        "volume": np.random.randint(5000, 50000, n).astype(float),
-        "foreign_buy_sell": np.random.normal(0, 500, n),
-        "trust_buy_sell": np.random.normal(0, 200, n),
-        "dealer_buy_sell": np.random.normal(0, 100, n),
-        "margin_balance": np.random.randint(10000, 50000, n).astype(float),
-        "short_balance": np.random.randint(1000, 5000, n).astype(float),
-    })
+    df = pd.DataFrame(
+        {
+            "date": dates,
+            "open": open_,
+            "high": high,
+            "low": low,
+            "close": close,
+            "volume": np.random.randint(5000, 50000, n).astype(float),
+            "foreign_buy_sell": np.random.normal(0, 500, n),
+            "trust_buy_sell": np.random.normal(0, 200, n),
+            "dealer_buy_sell": np.random.normal(0, 100, n),
+            "margin_balance": np.random.randint(10000, 50000, n).astype(float),
+            "short_balance": np.random.randint(1000, 5000, n).astype(float),
+        }
+    )
     return df
 
 
@@ -115,7 +117,9 @@ def sample_features_df(sample_price_df):
     df["realized_vol_5d"] = df["return_1d"].rolling(5).std()
     df["realized_vol_20d"] = df["return_1d"].rolling(20).std()
     log_hl = np.log(df["high"] / df["low"])
-    df["parkinson_vol"] = (log_hl ** 2 / (4 * np.log(2))).rolling(20).mean().apply(np.sqrt)
+    df["parkinson_vol"] = (
+        (log_hl**2 / (4 * np.log(2))).rolling(20).mean().apply(np.sqrt)
+    )
 
     # 微結構
     df["volume_ratio_5d"] = df["volume"] / df["volume"].rolling(5).mean()

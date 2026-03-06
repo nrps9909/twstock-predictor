@@ -68,6 +68,8 @@ def triple_barrier_label(
             continue
 
         entry_price = close[i]
+        if not np.isfinite(entry_price) or entry_price <= 0:
+            continue
         upper_barrier = entry_price + upper_multiplier * atr_vals[i]
         lower_barrier = entry_price - lower_multiplier * atr_vals[i]
 
@@ -97,7 +99,9 @@ def triple_barrier_label(
             labels[i] = (close[end_idx] - entry_price) / entry_price
             touch_type[i] = 0
 
-    return pd.Series(labels, index=df.index, name="tb_label")
+    result = pd.Series(labels, index=df.index, name="tb_label")
+    result = result.replace([np.inf, -np.inf], np.nan)
+    return result
 
 
 def triple_barrier_classify(
@@ -130,6 +134,8 @@ def triple_barrier_classify(
             continue
 
         entry_price = close[i]
+        if not np.isfinite(entry_price) or entry_price <= 0:
+            continue
         upper_barrier = entry_price + upper_multiplier * atr_vals[i]
         lower_barrier = entry_price - lower_multiplier * atr_vals[i]
 
@@ -183,7 +189,7 @@ def compute_sample_weights(
     valid_indices = np.where(valid_mask.values)[0]
     for i in valid_indices:
         end = min(i + max_holding, n - 1)
-        concurrency[i:end + 1] += 1
+        concurrency[i : end + 1] += 1
 
     # 避免除零
     concurrency = np.maximum(concurrency, 1)
@@ -192,7 +198,7 @@ def compute_sample_weights(
     weights = np.ones(n)
     for i in valid_indices:
         end = min(i + max_holding, n - 1)
-        avg_uniqueness = np.mean(1.0 / concurrency[i:end + 1])
+        avg_uniqueness = np.mean(1.0 / concurrency[i : end + 1])
         weights[i] = avg_uniqueness
 
     return pd.Series(weights, index=df.index, name="sample_weight")
