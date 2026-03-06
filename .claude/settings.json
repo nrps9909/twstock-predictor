@@ -1,0 +1,26 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "files=$(echo \"$CLAUDE_FILE_PATHS\" | tr ',' '\\n' | grep '\\.py$'); [ -z \"$files\" ] || (.venv/Scripts/python -m ruff format --quiet $files && .venv/Scripts/python -m ruff check --fix --quiet $files)",
+            "description": "Auto-format and lint Python files with ruff"
+          }
+        ]
+      }
+    ]
+  },
+  "permissions": {
+    "allow": [
+      "Bash(git status*)",
+      "Bash(git diff*)",
+      "Bash(git log*)",
+      "Bash(.venv/Scripts/python -m pytest*)",
+      "Bash(.venv/Scripts/python -m ruff*)",
+      "Bash(cd web && npm*)"
+    ]
+  }
+}
