@@ -1,0 +1,17 @@
+============================= test session starts =============================
+platform win32 -- Python 3.13.12, pytest-9.0.2, pluggy-1.6.0 -- D:\twstock-predictor\.venv\Scripts\python.exe
+cachedir: .pytest_cache
+rootdir: D:\twstock-predictor
+configfile: pyproject.toml
+plugins: anyio-4.12.1, langsmith-0.7.9, asyncio-1.3.0
+asyncio: mode=Mode.STRICT, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collecting ... collected 6 items
+
+tests/test_sentiment.py::TestSentimentAnalyzer::test_rule_based_bullish PASSED [ 16%]
+tests/test_sentiment.py::TestSentimentAnalyzer::test_rule_based_bearish PASSED [ 33%]
+tests/test_sentiment.py::TestSentimentAnalyzer::test_rule_based_neutral PASSED [ 50%]
+tests/test_sentiment.py::TestSentimentAnalyzer::test_aggregate_daily_empty PASSED [ 66%]
+tests/test_sentiment.py::TestSentimentAnalyzer::test_aggregate_daily_normal PASSED [ 83%]
+tests/test_sentiment.py::TestSentimentAnalyzer::test_sentiment_ma PASSED [100%]
+
+============================= 6 passed in 21.91s ==============================

@@ -1,0 +1,31 @@
+........................................................................ [ 32%]
+........................................................................ [ 64%]
+........................................................................ [ 96%]
+........                                                                 [100%]
+============================== warnings summary ===============================
+tests/test_factor_scoring.py::TestSectorAggregates::test_basic_aggregation
+tests/test_stock_analysis_service.py::TestScoring::test_score_returns_valid_result
+tests/test_stock_analysis_service.py::TestScoring::test_score_with_ml
+tests/test_stock_analysis_service.py::TestScoring::test_score_regime_affects_weights
+tests/test_stock_analysis_service.py::TestScoring::test_score_regime_affects_weights
+tests/test_stock_analysis_service.py::TestScoring::test_score_confidence_breakdown
+tests/test_stock_analysis_service.py::TestScoring::test_score_reasoning_not_empty
+  D:\twstock-predictor\.venv\Lib\site-packages\urllib3\connectionpool.py:1097: InsecureRequestWarning: Unverified HTTPS request is being made to host 'www.twse.com.tw'. Adding certificate verification is strongly advised. See: https://urllib3.readthedocs.io/en/latest/advanced-usage.html#tls-warnings
+    warnings.warn(
+
+tests/test_features.py: 86 warnings
+  D:\twstock-predictor\.venv\Lib\site-packages\sqlalchemy\sql\schema.py:3624: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    return util.wrap_callable(lambda ctx: fn(), fn)  # type: ignore
+
+tests/test_stock_analysis_service.py: 15 warnings
+tests/test_technical.py: 7 warnings
+  D:\twstock-predictor\.venv\Lib\site-packages\ta\trend.py:608: RuntimeWarning: invalid value encountered in scalar divide
+    dip[i] = 100 * (self._dip[i]/self._trs[i])
+
+tests/test_stock_analysis_service.py: 15 warnings
+tests/test_technical.py: 7 warnings
+  D:\twstock-predictor\.venv\Lib\site-packages\ta\trend.py:612: RuntimeWarning: invalid value encountered in scalar divide
+    din[i] = 100 * (self._din[i]/self._trs[i])
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+224 passed, 137 warnings in 54.47s
