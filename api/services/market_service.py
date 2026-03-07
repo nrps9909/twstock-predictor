@@ -25,6 +25,7 @@ from src.db.database import (
     get_all_factor_ic_summary,
     upsert_data_cache,
     get_data_cache,
+    get_data_cache_latest,
 )
 from src.analysis.technical import TechnicalAnalyzer
 
@@ -211,6 +212,37 @@ STOCK_SECTOR = {
     # green_energy
     "6488": "green_energy",
     "3481": "green_energy",
+    # optoelectronics (光電)
+    "2349": "optoelectronics",  # 錸德
+    "3008": "optoelectronics",  # 大立光
+    "2393": "optoelectronics",  # 億光
+    "6176": "optoelectronics",  # 瑞儀
+    "3406": "optoelectronics",  # 玉晶光
+    # electronic_parts (電子零組件) — stocks NOT already in electronics/semiconductor
+    "3037": "electronic_parts",  # 欣興
+    "2492": "electronic_parts",  # 華新科
+    "3036": "electronic_parts",  # 文曄
+    "8046": "electronic_parts",  # 南電
+    "2439": "electronic_parts",  # 美律
+    # steel (鋼鐵) — 2002 already in traditional, reclassify here
+    "2014": "steel",  # 中鴻
+    "2006": "steel",  # 東和鋼鐵
+    "2015": "steel",  # 豐興
+    "2023": "steel",  # 燁興
+    # chemical (化學)
+    "1304": "chemical",  # 台聚
+    "1312": "chemical",  # 國喬
+    "4722": "chemical",  # 國精化
+    "1710": "chemical",  # 東聯
+    # machinery (電機機械)
+    "1504": "machinery",  # 東元
+    "2371": "machinery",  # 大同
+    "1503": "machinery",  # 士電
+    "4532": "machinery",  # 瑞智
+    # tourism (觀光餐旅)
+    "2707": "tourism",  # 晶華
+    "2702": "tourism",  # 華園
+    "2706": "tourism",  # 第一店
 }
 
 DEFAULT_SECTOR = "other"
@@ -225,6 +257,12 @@ SECTOR_GLOBAL_WEIGHTS = {
     "shipping": (0.10, 0.10, 0.05, 0.75),
     "biotech": (0.15, 0.15, 0.05, 0.65),
     "green_energy": (0.15, 0.15, 0.10, 0.60),
+    "optoelectronics": (0.20, 0.15, 0.10, 0.55),
+    "electronic_parts": (0.25, 0.20, 0.10, 0.45),
+    "steel": (0.10, 0.10, 0.05, 0.75),
+    "chemical": (0.10, 0.10, 0.05, 0.75),
+    "machinery": (0.10, 0.10, 0.05, 0.75),
+    "tourism": (0.05, 0.05, 0.05, 0.85),
 }
 DEFAULT_GLOBAL_WEIGHTS = (0.30, 0.20, 0.15, 0.35)
 
@@ -236,6 +274,29 @@ SCALE_BIAS = 8.0  # ±6.25% bias → 0/1
 SCALE_GLOBAL_5D = 4.0  # ±12.5% global 5d return → 0/1
 SCALE_RELATIVE = 10.0  # ±5% relative strength → 0/1
 SCALE_GLOBAL_1D = 17.5  # legacy 1d return scale (kept for non-global uses)
+# ML sigmoid gain: maps ±2% cumulative predicted return → [0.1, 0.9]
+ML_SIGMOID_GAIN = 50.0
+
+
+def _data_freshness(df: pd.DataFrame, max_stale_days: int = 5) -> float:
+    """Compute freshness [0, 1] from DataFrame recency.
+
+    Returns 1.0 if latest data is from today, decays linearly to 0.0
+    after max_stale_days business days with no data.
+    """
+    if df is None or df.empty:
+        return 0.0
+    try:
+        if "date" in df.columns:
+            latest = pd.Timestamp(df["date"].iloc[-1]).date()
+        elif hasattr(df.index, "date"):
+            latest = df.index[-1].date() if hasattr(df.index[-1], "date") else date.today()
+        else:
+            return 0.8  # can't determine, assume reasonably fresh
+        days_old = (date.today() - latest).days
+        return max(0.0, min(1.0, 1.0 - days_old / max_stale_days))
+    except Exception:
+        return 0.8
 
 
 _ic_weights_cache: dict = {"date": None, "weights": None}
@@ -807,10 +868,10 @@ def _compute_technical_signal(signals: dict, df_tech: pd.DataFrame) -> FactorRes
     summary = signals.get("summary", {})
     raw = summary.get("raw_score", 0)
     max_s = summary.get("max_score", 5)
-    signal_score = (raw / max_s + 1) / 2 if max_s != 0 else 0.5
+    signal_score = max(0, min(1, (raw / max_s + 1) / 2)) if max_s != 0 else 0.5
     components["signal"] = round(signal_score, 4)
 
-    # 2. ADX trend strength 20%
+    # 2. ADX trend strength 20% — use DI+/DI- for direction, ADX for strength
     adx_val = df_tech["adx"].iloc[-1] if "adx" in df_tech.columns else None
     if adx_val is not None and not pd.isna(adx_val):
         if adx_val > 40:
@@ -819,10 +880,26 @@ def _compute_technical_signal(signals: dict, df_tech: pd.DataFrame) -> FactorRes
             adx_score = 0.7
         else:
             adx_score = 0.4
-        if adx_val > 25 and signal_score > 0.5:
-            adx_score = min(adx_score + 0.1, 1.0)
-        elif adx_val > 25 and signal_score < 0.5:
-            adx_score = max(adx_score - 0.1, 0.0)
+        # Use DI+ vs DI- for trend direction instead of signal_score
+        di_plus = df_tech["di_plus"].iloc[-1] if "di_plus" in df_tech.columns else None
+        di_minus = df_tech["di_minus"].iloc[-1] if "di_minus" in df_tech.columns else None
+        if (
+            di_plus is not None
+            and di_minus is not None
+            and not pd.isna(di_plus)
+            and not pd.isna(di_minus)
+            and adx_val > 25
+        ):
+            if di_plus > di_minus:
+                adx_score = min(adx_score + 0.1, 1.0)  # Confirmed uptrend
+            elif di_minus > di_plus:
+                adx_score = max(adx_score - 0.1, 0.0)  # Confirmed downtrend
+        elif adx_val > 25:
+            # Fallback: use signal_score if DI not available
+            if signal_score > 0.5:
+                adx_score = min(adx_score + 0.1, 1.0)
+            elif signal_score < 0.5:
+                adx_score = max(adx_score - 0.1, 0.0)
     else:
         adx_score = 0.5
     components["adx"] = round(adx_score, 4)
@@ -877,7 +954,7 @@ def _compute_technical_signal(signals: dict, df_tech: pd.DataFrame) -> FactorRes
 
     total = signal_score * 0.4 + adx_score * 0.2 + ma_score * 0.2 + obv_score * 0.2
     return FactorResult(
-        "technical_signal", round(total, 4), True, 1.0, components, raw_value=total
+        "technical_signal", round(total, 4), True, _data_freshness(df_tech), components, raw_value=total
     )
 
 
@@ -910,21 +987,25 @@ def _compute_short_momentum(df: pd.DataFrame) -> FactorResult:
     components["return_5d"] = round(float(ret_5d), 4)
     components["mtf_score"] = round(mtf, 4)
 
-    # 2. 均線乖離率 (40%)
-    if len(close) >= 5:
-        sma3 = float(close.tail(3).mean())
+    # 2. 均線乖離率 (40%) — Use 5d/20d SMA for less noise (3d SMA too noisy)
+    c = float(close.iloc[-1])
+    if len(close) >= 20:
         sma5 = float(close.tail(5).mean())
-        c = float(close.iloc[-1])
-        bias3 = (c - sma3) / sma3 if sma3 > 0 else 0
+        sma20 = float(close.tail(20).mean())
         bias5 = (c - sma5) / sma5 if sma5 > 0 else 0
-        bias_score = max(0, min(1, 0.5 + (bias3 * 0.5 + bias5 * 0.5) * 8.0))
+        bias20 = (c - sma20) / sma20 if sma20 > 0 else 0
+        bias_score = max(0, min(1, 0.5 + (bias5 * 0.4 + bias20 * 0.6) * SCALE_BIAS))
+    elif len(close) >= 5:
+        sma5 = float(close.tail(5).mean())
+        bias5 = (c - sma5) / sma5 if sma5 > 0 else 0
+        bias_score = max(0, min(1, 0.5 + bias5 * SCALE_BIAS))
     else:
         bias_score = 0.5
     components["bias"] = round(bias_score, 4)
 
     total = mtf * 0.60 + bias_score * 0.40
     return FactorResult(
-        "short_momentum", round(total, 4), True, 1.0, components, raw_value=total
+        "short_momentum", round(total, 4), True, _data_freshness(df), components, raw_value=total
     )
 
 
@@ -982,7 +1063,7 @@ def _compute_trust_flow(
         components["quarter_end_decay"] = round(decay, 4)
 
     return FactorResult(
-        "trust_flow", round(total, 4), True, 1.0, components, raw_value=total
+        "trust_flow", round(total, 4), True, _data_freshness(df), components, raw_value=total
     )
 
 
@@ -1021,31 +1102,40 @@ def _compute_volume_anomaly(df: pd.DataFrame, df_tech: pd.DataFrame) -> FactorRe
             v_chg = float(vol.iloc[i]) - float(vol.iloc[i - 1])
             if (p_chg > 0 and v_chg > 0) or (p_chg < 0 and v_chg < 0):
                 consistency_count += 1
-        consistency_score = 0.3 + consistency_count * 0.14
+        consistency_score = consistency_count * 0.2
     else:
         consistency_score = 0.5
     components["consistency"] = round(consistency_score, 4)
 
     # 3. OBV 趨勢確認 (20%)
+    # OBV is computed on volume in lots (張=1000 shares). Use relative slope
+    # instead of ±2% absolute threshold which is too tight for lot-based OBV.
     obv_score = 0.5
     if "obv" in df_tech.columns and len(df_tech) >= 20:
         obv = df_tech["obv"].dropna()
         if len(obv) >= 20:
             obv_5d = float(obv.tail(5).mean())
             obv_20d = float(obv.tail(20).mean())
-            if obv_5d > obv_20d * 1.02:
-                obv_score = 0.7
-            elif obv_5d < obv_20d * 0.98:
-                obv_score = 0.3
+            # Normalize by 20d volume to make threshold stock-size independent
+            avg_vol = float(df["volume"].tail(20).mean()) if len(df) >= 20 else 1.0
+            if avg_vol > 0:
+                obv_diff_norm = (obv_5d - obv_20d) / (avg_vol * 5)  # multi-day scale
+                # Smooth sigmoid: maps ±0.5 normalized diff → [0.2, 0.8]
+                obv_score = max(0.15, min(0.85, 0.5 + obv_diff_norm * 0.6))
+            else:
+                if obv_5d > obv_20d * 1.02:
+                    obv_score = 0.7
+                elif obv_5d < obv_20d * 0.98:
+                    obv_score = 0.3
     components["obv_trend"] = round(obv_score, 4)
 
     total = expansion_score * 0.50 + consistency_score * 0.30 + obv_score * 0.20
     return FactorResult(
-        "volume_anomaly", round(total, 4), True, 1.0, components, raw_value=total
+        "volume_anomaly", round(total, 4), True, _data_freshness(df), components, raw_value=total
     )
 
 
-def _compute_margin_sentiment(df: pd.DataFrame) -> FactorResult:
+def _compute_margin_sentiment(df: pd.DataFrame, stock_id: str = "") -> FactorResult:
     """融資融券情緒 (5%) — 反向指標 (沿用 margin_retail 邏輯)"""
     if df.empty or "margin_balance" not in df.columns:
         return FactorResult("margin_sentiment", 0.5, False, 0.0)
@@ -1074,41 +1164,39 @@ def _compute_margin_sentiment(df: pd.DataFrame) -> FactorResult:
         margin_trend_score = 0.5
     components["margin_trend"] = round(margin_trend_score, 4)
 
-    # 2. Margin utilization 30%
+    # 2. Margin utilization 30% — Smooth scoring (inverse: high margin = bearish)
+    # TW typical utilization 30-70% of 20d max
     if len(margin) >= 20:
         max_20d = float(margin.tail(20).max())
         if max_20d > 0:
             utilization = recent_margin / max_20d
-            if utilization > 0.8:
-                util_score = 0.2
-            elif utilization > 0.6:
-                util_score = 0.35
-            elif utilization < 0.3:
-                util_score = 0.7
-            else:
-                util_score = 0.5
+            # Linear: util 0.0→0.80, util 0.5→0.50, util 1.0→0.20
+            util_score = max(0.15, min(0.85, 0.80 - utilization * 0.60))
         else:
             util_score = 0.5
     else:
         util_score = 0.5
     components["utilization"] = round(util_score, 4)
 
-    # 3. Short/Margin ratio 20%
+    # 3. Short/Margin ratio 20% — TW typical ratio is 2-8%
+    # Contrarian: high short ratio = bullish (short squeeze potential)
     if not short.empty and len(short) >= 1 and recent_margin > 0:
         short_ratio = float(short.iloc[-1]) / recent_margin
-        if short_ratio > 0.20:
-            short_score = 0.7
-        elif short_ratio > 0.10:
-            short_score = 0.6
-        else:
-            short_score = 0.5
+        # Linear: ratio 0→0.50, ratio 0.08→0.60, ratio 0.20→0.75
+        short_score = max(0.45, min(0.80, 0.50 + short_ratio * 1.25))
     else:
         short_score = 0.5
     components["short_ratio"] = round(short_score, 4)
 
     total = margin_trend_score * 0.50 + util_score * 0.30 + short_score * 0.20
+
+    sector = STOCK_SECTOR.get(stock_id, DEFAULT_SECTOR)
+    if sector == "finance":
+        total = 0.5 + (total - 0.5) * 0.3
+        components["finance_dampened"] = True
+
     return FactorResult(
-        "margin_sentiment", round(total, 4), True, 0.9, components, raw_value=total
+        "margin_sentiment", round(total, 4), True, _data_freshness(df), components, raw_value=total
     )
 
 
@@ -1160,7 +1248,7 @@ def _compute_trend_momentum(df: pd.DataFrame, df_tech: pd.DataFrame) -> FactorRe
         ma_score = 0.5
     components["ma_alignment"] = round(ma_score, 4)
 
-    # 3. ADX 趨勢確認 (30%)
+    # 3. ADX 趨勢確認 (30%) — use DI+/DI- for direction
     adx_score = 0.5
     if "adx" in df_tech.columns and len(df_tech) >= 5:
         adx = float(df_tech["adx"].iloc[-1])
@@ -1170,15 +1258,29 @@ def _compute_trend_momentum(df: pd.DataFrame, df_tech: pd.DataFrame) -> FactorRe
             adx_score = 0.65
         else:
             adx_score = 0.40
-        if adx > 25 and ret_score > 0.55:
-            adx_score = min(adx_score + 0.1, 1.0)
-        elif adx > 25 and ret_score < 0.45:
-            adx_score = max(adx_score - 0.1, 0.0)
+        di_plus = df_tech["di_plus"].iloc[-1] if "di_plus" in df_tech.columns else None
+        di_minus = df_tech["di_minus"].iloc[-1] if "di_minus" in df_tech.columns else None
+        if (
+            di_plus is not None
+            and di_minus is not None
+            and not pd.isna(di_plus)
+            and not pd.isna(di_minus)
+            and adx > 25
+        ):
+            if di_plus > di_minus:
+                adx_score = min(adx_score + 0.1, 1.0)
+            elif di_minus > di_plus:
+                adx_score = max(adx_score - 0.1, 0.0)
+        elif adx > 25:
+            if ret_score > 0.55:
+                adx_score = min(adx_score + 0.1, 1.0)
+            elif ret_score < 0.45:
+                adx_score = max(adx_score - 0.1, 0.0)
     components["adx"] = round(adx_score, 4)
 
     total = ret_score * 0.40 + ma_score * 0.30 + adx_score * 0.30
     return FactorResult(
-        "trend_momentum", round(total, 4), True, 1.0, components, raw_value=total
+        "trend_momentum", round(total, 4), True, _data_freshness(df), components, raw_value=total
     )
 
 
@@ -1202,8 +1304,9 @@ def _compute_revenue_momentum(revenue_df: pd.DataFrame | None) -> FactorResult:
         rev["date"] = pd.to_datetime(rev["date"])
         # Revenue for a given month is reported by the 10th of the next month
         # E.g., January revenue available after Feb 10
+        # MonthEnd(0) → end of current month; +10 days → 10th of next month
         rev["report_avail_date"] = rev["date"].apply(
-            lambda d: (d + pd.offsets.MonthEnd(1) + pd.DateOffset(days=10)).date()
+            lambda d: (d + pd.offsets.MonthEnd(0) + pd.DateOffset(days=10)).date()
         )
         rev = rev[rev["report_avail_date"] <= today]
         if len(rev) < 13:
@@ -1218,20 +1321,19 @@ def _compute_revenue_momentum(revenue_df: pd.DataFrame | None) -> FactorResult:
     latest = float(rev["revenue"].iloc[-1])
     year_ago = float(rev["revenue"].iloc[-13])
 
-    # 1. 最新月營收 YoY (50%)
+    # 1. 最新月營收 YoY (50%) — smooth + Lunar New Year seasonal adjustment
     yoy = (latest - year_ago) / year_ago if year_ago > 0 else 0.0
-    if yoy > 0.30:
-        yoy_score = 0.85
-    elif yoy > 0.15:
-        yoy_score = 0.72
-    elif yoy > 0.05:
-        yoy_score = 0.60
-    elif yoy > -0.05:
-        yoy_score = 0.50
-    elif yoy > -0.15:
-        yoy_score = 0.38
-    else:
-        yoy_score = 0.22
+
+    # Lunar New Year seasonal adjustment: Jan/Feb revenue distorted by holiday
+    # timing shifts (factory shutdowns move between Jan-Feb each year).
+    # Dampen MoM sensitivity and widen YoY tolerance for these months.
+    latest_date = pd.Timestamp(rev["date"].iloc[-1])
+    is_lunar_ny_season = latest_date.month in (1, 2)
+    if is_lunar_ny_season:
+        components["lunar_ny_adj"] = True
+
+    # Smooth: maps YoY to score. yoy -30%→0.20, 0%→0.50, +15%→0.68, +30%→0.82
+    yoy_score = max(0.15, min(0.90, 0.50 + yoy * 1.2))
     components["yoy"] = round(yoy, 4)
     components["yoy_score"] = round(yoy_score, 4)
 
@@ -1259,18 +1361,31 @@ def _compute_revenue_momentum(revenue_df: pd.DataFrame | None) -> FactorResult:
             accel_score = max(0, min(1, 0.5 + accel * 3.0))
     components["accel"] = round(accel_score, 4)
 
-    # 3. MoM 月增率 (20%)
+    # 3. MoM 月增率 (20%) — dampened during Lunar NY season
     mom_score = 0.5
     if len(rev) >= 2:
         prev_month = float(rev["revenue"].iloc[-2])
         if prev_month > 0:
             mom = (latest - prev_month) / prev_month
-            mom_score = max(0, min(1, 0.5 + mom * 3.0))
+            # During Lunar NY (Jan/Feb), MoM swings are seasonal noise — dampen
+            mom_gain = 1.5 if is_lunar_ny_season else 3.0
+            mom_score = max(0, min(1, 0.5 + mom * mom_gain))
     components["mom"] = round(mom_score, 4)
 
     total = yoy_score * 0.50 + accel_score * 0.30 + mom_score * 0.20
+
+    # Freshness based on report availability date (not raw month date)
+    # Revenue dates are 1st-of-month; use report_avail_date for accurate staleness
+    rev_freshness = 0.8
+    if "report_avail_date" in rev.columns:
+        latest_avail = rev["report_avail_date"].iloc[-1]
+        if not isinstance(latest_avail, date):
+            latest_avail = pd.Timestamp(latest_avail).date()
+        days_since = (date.today() - latest_avail).days
+        rev_freshness = max(0.0, min(1.0, 1.0 - days_since / 35))
+
     return FactorResult(
-        "revenue_momentum", round(total, 4), True, 0.8, components, raw_value=total
+        "revenue_momentum", round(total, 4), True, rev_freshness, components, raw_value=total
     )
 
 
@@ -1305,16 +1420,16 @@ def _compute_institutional_sync(trust_info: dict, df: pd.DataFrame) -> FactorRes
         sync_score = 0.50
     components["foreign_trust_sync"] = round(sync_score, 4)
 
-    # 2. 三法人合計方向 (25%)
-    positive_count = sum(1 for x in [foreign_cum, trust_cum, dealer_cum] if x > 0)
-    if positive_count == 3:
-        direction_score = 0.90
-    elif positive_count == 2:
-        direction_score = 0.65
-    elif positive_count == 1:
-        direction_score = 0.35
-    else:
-        direction_score = 0.10
+    # 2. 三法人合計方向 (25%) — magnitude-weighted
+    flows = [foreign_cum, trust_cum, dealer_cum]
+    positive_count = sum(1 for x in flows if x > 0)
+    total_abs = sum(abs(x) for x in flows) or 1.0
+    # Weighted net: larger flows contribute more to direction score
+    weighted_net = sum(x for x in flows) / total_abs  # range [-1, 1]
+    # Blend count-based + magnitude-based
+    count_score = {0: 0.10, 1: 0.35, 2: 0.65, 3: 0.90}[positive_count]
+    mag_score = max(0.0, min(1.0, 0.5 + weighted_net * 0.4))
+    direction_score = count_score * 0.6 + mag_score * 0.4
     components["direction"] = round(direction_score, 4)
 
     # 3. 法人 vs 散戶背離 (20%)
@@ -1358,7 +1473,7 @@ def _compute_institutional_sync(trust_info: dict, df: pd.DataFrame) -> FactorRes
 
 
 def _compute_volatility_regime(df: pd.DataFrame, df_tech: pd.DataFrame) -> FactorResult:
-    """波動率狀態 (5%) — 沿用 volatility 邏輯"""
+    """波動率狀態 (4%) — 沿用 volatility 邏輯"""
     if df.empty or len(df) < 20:
         return FactorResult("volatility_regime", 0.5, False, 0.0)
 
@@ -1368,19 +1483,11 @@ def _compute_volatility_regime(df: pd.DataFrame, df_tech: pd.DataFrame) -> Facto
 
     components = {}
 
-    # 1. Low volatility premium 40%
+    # 1. Low volatility premium 40% — TWSE-calibrated (typical 15-40% annualized)
+    # Smooth linear: vol 10%→0.90, vol 25%→0.55, vol 40%→0.20, vol 55%→0.0
     returns = close.pct_change().dropna()
     vol_20d = float(returns.tail(20).std()) * (252**0.5)
-    if vol_20d < 0.20:
-        vol_score = 1.0
-    elif vol_20d < 0.30:
-        vol_score = 0.7
-    elif vol_20d < 0.40:
-        vol_score = 0.5
-    elif vol_20d < 0.55:
-        vol_score = 0.3
-    else:
-        vol_score = 0.0
+    vol_score = max(0.0, min(1.0, 1.10 - vol_20d * 2.0))
     components["low_vol_premium"] = round(vol_score, 4)
     components["vol_20d_annualized"] = round(vol_20d, 4)
 
@@ -1390,14 +1497,8 @@ def _compute_volatility_regime(df: pd.DataFrame, df_tech: pd.DataFrame) -> Facto
             float(returns.tail(5).std()) * (252**0.5) if len(returns) >= 5 else vol_20d
         )
         vol_ratio = vol_5d / vol_20d if vol_20d > 0 else 1.0
-        if vol_ratio < 0.7:
-            compress_score = 0.65
-        elif vol_ratio < 1.0:
-            compress_score = 0.55
-        elif vol_ratio < 1.5:
-            compress_score = 0.45
-        else:
-            compress_score = 0.3
+        # Smooth: ratio 0.5→0.75, ratio 1.0→0.55, ratio 1.5→0.35, ratio 2.0→0.15
+        compress_score = max(0.10, min(0.80, 0.75 - (vol_ratio - 0.5) * 0.40))
     else:
         compress_score = 0.5
     components["compression"] = round(compress_score, 4)
@@ -1415,7 +1516,7 @@ def _compute_volatility_regime(df: pd.DataFrame, df_tech: pd.DataFrame) -> Facto
 
     total = vol_score * 0.40 + compress_score * 0.30 + bb_score * 0.30
     return FactorResult(
-        "volatility_regime", round(total, 4), True, 1.0, components, raw_value=total
+        "volatility_regime", round(total, 4), True, _data_freshness(df), components, raw_value=total
     )
 
 
@@ -1454,8 +1555,8 @@ def _compute_news_sentiment(
                 src_scores = src_df["sentiment_score"].dropna()
                 if not src_scores.empty:
                     avg = float(src_scores.mean())
-                    # Normalize: if scores are in -1~1 range, map to 0~1
-                    if avg < 0 or (avg == 0 and src_scores.min() < 0):
+                    # Normalize: scores are in -1~1 range, always map to 0~1
+                    if -1.0 <= avg <= 1.0:
                         avg = (avg + 1) / 2
                     weighted_sum += avg * w
                     weight_total += w
@@ -1481,8 +1582,7 @@ def _compute_news_sentiment(
         elif len(scores) >= 3:
             # Few articles: use overall sentiment direction
             avg = float(scores.mean())
-            if avg < 0:
-                avg = (avg + 1) / 2
+            avg = (avg + 1) / 2
             momentum_score = max(0.0, min(1.0, avg))
     components["momentum"] = round(momentum_score, 4)
 
@@ -1499,19 +1599,22 @@ def _compute_news_sentiment(
             if total_engage > 0:
                 # High engagement amplifies sentiment direction
                 avg_per_article = total_engage / len(engagement)
-                if avg_per_article > 20:
-                    engage_score = 0.7 if source_score > 0.5 else 0.3
-                elif avg_per_article > 5:
-                    engage_score = 0.6 if source_score > 0.5 else 0.4
-            elif len(engagement) >= 5:
-                recent_engage = float(engagement.tail(3).mean())
-                avg_engage = float(engagement.mean())
-                if avg_engage > 0:
-                    ratio = recent_engage / avg_engage
-                    if ratio > 2.0:
-                        engage_score = 0.7 if source_score > 0.5 else 0.3
-                    elif ratio > 1.3:
-                        engage_score = 0.6 if source_score > 0.5 else 0.4
+                engage_base = max(0.3, min(0.7, 0.5 + (avg_per_article - 10) * 0.01))
+                # Direction-adjust based on sentiment direction
+                if source_score > 0.5:
+                    engage_score = max(engage_base, 0.5)
+                else:
+                    engage_score = min(engage_base, 0.5)
+                # Check engagement spike (recent vs average)
+                if len(engagement) >= 5:
+                    recent_engage = float(engagement.tail(3).mean())
+                    avg_engage = float(engagement.mean())
+                    if avg_engage > 0:
+                        ratio = recent_engage / avg_engage
+                        if ratio > 2.0:
+                            engage_score = 0.7 if source_score > 0.5 else 0.3
+                        elif ratio > 1.3:
+                            engage_score = max(engage_score, 0.6 if source_score > 0.5 else 0.4)
     components["engagement"] = round(engage_score, 4)
 
     freshness = 0.5
@@ -1528,6 +1631,8 @@ def _compute_news_sentiment(
             freshness = 0.5
 
     total = source_score * 0.40 + momentum_score * 0.30 + engage_score * 0.30
+    # Apply freshness decay — stale news should contribute less
+    total = 0.5 + (total - 0.5) * freshness
     # available reflects actual data quality, not just presence of stock_id in scores
     has_real_data = weight_total > 0 or (
         sentiment_df is not None and not sentiment_df.empty and len(sentiment_df) >= 3
@@ -1596,25 +1701,47 @@ def _compute_global_context(global_data: dict | None, sector: str = "") -> Facto
         + ewt_rel_score * w_ewt
     )
 
-    available = sox_ret != 0 or tsm_ret != 0 or asml_ret != 0
+    available = (
+        global_data.get("sox_5d") is not None
+        or global_data.get("tsm_5d") is not None
+        or global_data.get("sox_return") is not None
+        or global_data.get("tsm_return") is not None
+    )
     return FactorResult(
         "global_context", round(total, 4), available, 0.9, components, raw_value=total
     )
 
 
 def _compute_ml_ensemble(ml_scores: dict, stock_id: str) -> FactorResult:
-    """ML 集成 (8%) — signal 映射"""
+    """ML 集成 (15%) — signal 映射 with quality dampening
+
+    Extreme ML predictions (> 0.85 or < 0.15) are dampened toward 0.5
+    to reduce overconfidence from potential overfitting.
+    """
     if stock_id not in ml_scores:
         return FactorResult("ml_ensemble", 0.5, False, 0.0)
 
-    score = ml_scores[stock_id]
+    raw_score = ml_scores[stock_id]
+    # Quality gate: dampen extreme predictions (cap deviation from 0.5 at 0.35)
+    # This prevents ML from dominating when it's very confident but possibly overfit
+    deviation = raw_score - 0.5
+    max_deviation = 0.35  # score range [0.15, 0.85]
+    dampened = 0.5 + max(-max_deviation, min(max_deviation, deviation))
+
+    components = {
+        "raw_ml_score": round(raw_score, 4),
+        "dampened_score": round(dampened, 4),
+    }
+    if abs(deviation) > max_deviation:
+        components["quality_dampened"] = True
+
     return FactorResult(
         "ml_ensemble",
-        round(score, 4),
+        round(dampened, 4),
         True,
         1.0,
-        {"raw_ml_score": round(score, 4)},
-        raw_value=score,
+        components,
+        raw_value=dampened,
     )
 
 
@@ -1702,55 +1829,60 @@ def _compute_fundamental_value(
         data_source = data_source if data_source != "none" else "yfinance"
     if div_yield is None and info.get("dividendYield") is not None:
         div_yield = info["dividendYield"]
+        # yfinance dividendYield is usually decimal (0.04 = 4%), but some sources
+        # return percentage (4.0). Normalize: if > 1.0, assume percentage.
+        if div_yield is not None and div_yield > 1.0:
+            div_yield = div_yield / 100.0
     roe = info.get("returnOnEquity")
     if "data_source" not in components and data_source != "none":
         components["data_source"] = data_source
 
-    # 1. P/E 風險過濾 (30%)
+    # 1. P/E 風險過濾 (30%) — TWSE-calibrated (avg P/E 13-16)
+    sector = STOCK_SECTOR.get(stock_id, DEFAULT_SECTOR)
     if pe is not None:
         components["pe_ratio"] = round(pe, 2)
-        if pe > 80:
-            pe_score = 0.30
-        elif pe > 50:
-            pe_score = 0.38
-        elif pe < 0:
-            pe_score = 0.30
-        elif pe < 5:
-            pe_score = 0.42
+        # Sector-aware P/E scoring with smooth interpolation
+        pe_fair = {"semiconductor": 22, "biotech": 35, "electronics": 18,
+                   "finance": 12, "steel": 10, "traditional": 12,
+                   "chemical": 14}.get(sector, 16)
+        if pe < 0:
+            pe_score = 0.35  # Negative earnings — may be temporary
         else:
-            pe_score = 0.50
+            # Ratio to sector fair P/E: ratio 0.5→0.70, 1.0→0.58, 2.0→0.30
+            pe_ratio = pe / pe_fair if pe_fair > 0 else 1.0
+            if pe_ratio < 0.3:
+                pe_score = 0.42  # Suspiciously low (earnings quality concern)
+            else:
+                pe_score = max(0.20, min(0.75, 0.75 - pe_ratio * 0.18))
     else:
         pe_score = 0.50
 
-    # 2. P/B mean-reversion (20%)
+    # 2. P/B mean-reversion (20%) — Sector-aware: semiconductor/biotech trade at
+    # high P/B structurally (asset-light, IP-driven), while banks trade < 1.5x
     if pb is not None:
         components["pb_ratio"] = round(pb, 2)
-        if pb < 1.0:
-            pb_score = 0.75
-        elif pb < 1.5:
-            pb_score = 0.60
-        elif pb < 2.5:
-            pb_score = 0.50
-        elif pb < 3.0:
-            pb_score = 0.40
-        else:
-            pb_score = 0.25
+        pb_fair = {"semiconductor": 3.5, "biotech": 3.0, "electronics": 2.5,
+                   "finance": 1.2, "steel": 1.0, "chemical": 1.3}.get(sector, 1.8)
+        pb_ratio_to_fair = pb / pb_fair if pb_fair > 0 else 1.0
+        # Smooth scoring: below fair value is bullish, above is bearish
+        # ratio 0.5 → 0.80, ratio 1.0 → 0.55, ratio 1.5 → 0.35, ratio 2.0+ → 0.20
+        pb_score = max(0.15, min(0.85, 0.80 - pb_ratio_to_fair * 0.30))
     else:
         pb_score = 0.50
 
-    # 3. ROE 穩健度 (25%)
+    # 3. ROE 穩健度 (25%) — Sector-aware: semiconductor expects higher ROE
+    # (TSMC ~25%), finance lower (~8-12%), traditional industry (~5-10%)
     if roe is not None:
         components["roe"] = round(roe, 4)
-        if roe > 0.25:
-            roe_score = 0.85
-        elif roe > 0.15:
-            roe_score = 0.72
-        elif roe > 0.08:
-            roe_score = 0.58
-        elif roe > 0:
-            roe_score = 0.42
+        roe_good = {"semiconductor": 0.20, "biotech": 0.12, "electronics": 0.15,
+                    "finance": 0.10, "steel": 0.08, "traditional": 0.08,
+                    "chemical": 0.10}.get(sector, 0.12)
+        # Smooth: ROE/roe_good ratio → score. ratio 2.0→0.85, 1.0→0.65, 0.5→0.50
+        if roe > 0:
+            roe_ratio = roe / roe_good
+            roe_score = max(0.30, min(0.90, 0.50 + roe_ratio * 0.18))
         else:
-            roe_score = 0.25
+            roe_score = 0.25  # Negative ROE always bad
     else:
         roe_score = 0.50
 
@@ -1797,23 +1929,16 @@ def _compute_liquidity_quality(df: pd.DataFrame) -> FactorResult:
 
     components = {}
 
-    # 1. Average daily volume 50%
+    # 1. Average daily volume 50% — TWSE-calibrated (mid-cap avg ~1000-3000 lots)
     avg_vol = float(vol.tail(20).mean())
-    vol_score = min(avg_vol / 5000, 1.0)
+    vol_score = min(avg_vol / 1500, 1.0)
     components["avg_volume_20d"] = round(avg_vol, 0)
     components["vol_score"] = round(vol_score, 4)
 
     # 2. Volume stability 25%
     vol_std = float(vol.tail(20).std())
     cv = vol_std / avg_vol if avg_vol > 0 else 1.0
-    if cv < 0.3:
-        stability_score = 0.9
-    elif cv < 0.5:
-        stability_score = 0.7
-    elif cv < 0.8:
-        stability_score = 0.5
-    else:
-        stability_score = 0.3
+    stability_score = max(0.2, min(0.95, 1.0 - cv * 0.8))
     components["stability"] = round(stability_score, 4)
 
     # 3. Spread proxy 25%
@@ -1821,14 +1946,7 @@ def _compute_liquidity_quality(df: pd.DataFrame) -> FactorResult:
         spread_df = ((df["high"] - df["low"]) / df["close"]).dropna().tail(20)
         if not spread_df.empty:
             avg_spread = float(spread_df.mean())
-            if avg_spread < 0.01:
-                spread_score = 0.9
-            elif avg_spread < 0.02:
-                spread_score = 0.7
-            elif avg_spread < 0.04:
-                spread_score = 0.5
-            else:
-                spread_score = 0.3
+            spread_score = max(0.2, min(0.95, 1.0 - avg_spread * 18.0))
         else:
             spread_score = 0.5
     else:
@@ -1837,29 +1955,21 @@ def _compute_liquidity_quality(df: pd.DataFrame) -> FactorResult:
 
     total = vol_score * 0.50 + stability_score * 0.25 + spread_score * 0.25
     return FactorResult(
-        "liquidity_quality", round(total, 4), True, 1.0, components, raw_value=total
+        "liquidity_quality", round(total, 4), True, _data_freshness(df), components, raw_value=total
     )
 
 
 def _compute_macro_risk(macro_data: dict | None) -> FactorResult:
-    """宏觀風險環境 (4%) — VIX + 殖利率曲線 + USD/TWD + 美10Y + 銅價"""
+    """宏觀風險環境 (5%) — VIX + 殖利率曲線 + USD/TWD + 美10Y + 銅價"""
     if macro_data is None:
         return FactorResult("macro_risk", 0.5, False, 0.0)
 
     components = {}
 
-    # 1. VIX 恐慌指標 (30%)
+    # 1. VIX 恐慌指標 (30%) — Smooth sigmoid instead of discrete bins
     vix = macro_data.get("vix", 20)
-    if vix < 15:
-        vix_score = 0.80
-    elif vix < 20:
-        vix_score = 0.65
-    elif vix < 25:
-        vix_score = 0.45
-    elif vix < 30:
-        vix_score = 0.30
-    else:
-        vix_score = 0.15
+    # Maps VIX 10→0.85, 15→0.72, 20→0.55, 25→0.38, 30→0.22, 40→0.10
+    vix_score = max(0.05, min(0.90, 1.0 - vix * 0.025))
     components["vix"] = round(vix, 2)
     components["vix_score"] = round(vix_score, 4)
 
@@ -1905,7 +2015,13 @@ def _compute_macro_risk(macro_data: dict | None) -> FactorResult:
         + copper_score * 0.15
     )
 
-    available = vix != 20.0 or fx_trend != 0 or tnx_chg != 0
+    available = (
+        macro_data.get("vix") is not None
+        or fx_trend != 0
+        or tnx_chg != 0
+        or yield_spread != 0
+        or copper_ret != 0
+    )
     return FactorResult(
         "macro_risk", round(total, 4), available, 0.9, components, raw_value=total
     )
@@ -2027,28 +2143,36 @@ def _compute_margin_quality(
                         break
 
             if gross_profit is not None and total_revenue is not None:
-                # Latest quarter gross margin
-                gm_latest = (
-                    float(gross_profit.iloc[0]) / float(total_revenue.iloc[0])
-                    if float(total_revenue.iloc[0]) != 0
-                    else 0
-                )
-                gm_prev = (
-                    float(gross_profit.iloc[1]) / float(total_revenue.iloc[1])
-                    if float(total_revenue.iloc[1]) != 0
-                    else 0
-                )
+                # Latest quarter gross margin — guard against NaN
+                gp0 = gross_profit.iloc[0]
+                tr0 = total_revenue.iloc[0]
+                gp1 = gross_profit.iloc[1]
+                tr1 = total_revenue.iloc[1]
+                if (
+                    pd.notna(gp0)
+                    and pd.notna(tr0)
+                    and pd.notna(gp1)
+                    and pd.notna(tr1)
+                    and float(tr0) != 0
+                    and float(tr1) != 0
+                ):
+                    gm_latest = float(gp0) / float(tr0)
+                    gm_prev = float(gp1) / float(tr1)
+                else:
+                    gm_latest = 0
+                    gm_prev = 0
 
                 gm_qoq_change = gm_latest - gm_prev
 
                 # YoY if 5+ quarters
                 gm_yoy_change = 0.0
                 if qis.shape[1] >= 5:
-                    gm_yoy = (
-                        float(gross_profit.iloc[4]) / float(total_revenue.iloc[4])
-                        if float(total_revenue.iloc[4]) != 0
-                        else 0
-                    )
+                    gp4 = gross_profit.iloc[4]
+                    tr4 = total_revenue.iloc[4]
+                    if pd.notna(gp4) and pd.notna(tr4) and float(tr4) != 0:
+                        gm_yoy = float(gp4) / float(tr4)
+                    else:
+                        gm_yoy = gm_latest  # no change if data missing
                     gm_yoy_change = gm_latest - gm_yoy
 
                 # Scoring: 毛利率趨勢 (60%)
@@ -2062,20 +2186,15 @@ def _compute_margin_quality(
 
                 # 營益率水準 (40%)
                 op_margin = 0.0
-                if operating_income is not None and float(total_revenue.iloc[0]) != 0:
-                    op_margin = float(operating_income.iloc[0]) / float(
-                        total_revenue.iloc[0]
-                    )
-                if op_margin > 0.20:
-                    level_score = 0.85
-                elif op_margin > 0.10:
-                    level_score = 0.70
-                elif op_margin > 0.05:
-                    level_score = 0.55
-                elif op_margin > 0:
-                    level_score = 0.42
-                else:
-                    level_score = 0.25
+                if (
+                    operating_income is not None
+                    and pd.notna(operating_income.iloc[0])
+                    and pd.notna(tr0)
+                    and float(tr0) != 0
+                ):
+                    op_margin = float(operating_income.iloc[0]) / float(tr0)
+                # Smooth linear: op_margin -5%→0.20, 0%→0.35, 10%→0.60, 20%→0.80
+                level_score = max(0.20, min(0.85, 0.35 + op_margin * 2.5))
                 components["op_margin"] = round(op_margin, 4)
                 components["level_score"] = round(level_score, 4)
 
@@ -2089,28 +2208,23 @@ def _compute_margin_quality(
                     raw_value=total,
                 )
 
-        # Fallback: ticker.info margins
+        # Fallback: ticker.info margins (level-only, no trend available)
         gm = info.get("grossMargins")
         om = info.get("operatingMargins")
         if gm is not None or om is not None:
             components = {}
+            # Gross margin level — smooth linear scoring aligned with Tier 1
             gm_score = 0.5
             if gm is not None:
                 components["grossMargins"] = round(gm, 4)
-                gm_score = max(0.0, min(1.0, 0.3 + gm * 1.0))
+                # Linear: gm 0%→0.30, gm 20%→0.50, gm 40%→0.70, gm 60%+→0.85
+                gm_score = max(0.25, min(0.85, 0.30 + gm * 1.0))
+            # Operating margin level — consistent with Tier 1 level_score
             om_score = 0.5
             if om is not None:
                 components["operatingMargins"] = round(om, 4)
-                if om > 0.20:
-                    om_score = 0.85
-                elif om > 0.10:
-                    om_score = 0.70
-                elif om > 0.05:
-                    om_score = 0.55
-                elif om > 0:
-                    om_score = 0.42
-                else:
-                    om_score = 0.25
+                # Smooth linear: om 0%→0.35, om 10%→0.55, om 20%→0.75
+                om_score = max(0.20, min(0.85, 0.35 + om * 2.5))
             total = gm_score * 0.60 + om_score * 0.40
             return FactorResult(
                 "margin_quality",
@@ -2169,6 +2283,14 @@ def _compute_sector_aggregates(
             logger.warning(
                 "TWSE industry indices fetch failed in sector_aggregates: %s", e
             )
+    # Fallback: use most recent cached data (covers weekends/holidays)
+    if not industry_indices:
+        try:
+            _latest = get_data_cache_latest("industry_indices")
+            if _latest:
+                industry_indices = json.loads(_latest)
+        except Exception:
+            pass
 
     sector_data = {}
     all_flows = []
@@ -2267,9 +2389,17 @@ def _compute_sector_rotation(stock_id: str, sector_data: dict | None) -> FactorR
     mkt_return = market_avg.get("avg_return_20d", 0)
 
     # 1. 產業法人流向 vs 市場平均 (35%)
+    # Use cross-sectional flow_std for z-score normalization when available
     flow_diff = s_data["net_flow"] - mkt_flow
-    flow_denom = max(abs(mkt_flow), 1000.0)
-    flow_score = max(0.0, min(1.0, 0.5 + (flow_diff / flow_denom) * 0.3))
+    flow_std = market_avg.get("flow_std_normalized", 0)
+    if flow_std > 0 and s_data.get("stock_count", 0) > 0:
+        # Z-score approach: normalize by cross-sectional dispersion
+        avg_vol_sector = abs(s_data["net_flow"]) / max(s_data["stock_count"], 1)
+        flow_z = flow_diff / (flow_std * max(avg_vol_sector, 1000.0))
+        flow_score = max(0.0, min(1.0, 0.5 + flow_z * 0.2))
+    else:
+        flow_denom = max(abs(mkt_flow), 1000.0)
+        flow_score = max(0.0, min(1.0, 0.5 + (flow_diff / flow_denom) * 0.3))
     components["flow_vs_market"] = round(flow_score, 4)
     components["sector"] = sector
 
@@ -2278,9 +2408,9 @@ def _compute_sector_rotation(stock_id: str, sector_data: dict | None) -> FactorR
     mkt_index_return = market_avg.get("index_return", 0)
     has_index = index_return is not None
     if has_index:
-        # 產業指數 vs 市場平均指數的相對強弱
+        # 產業指數 vs 市場平均指數的相對強弱 (scale aligned with return coeff 5.0)
         idx_diff = index_return - mkt_index_return
-        index_score = max(0.0, min(1.0, 0.5 + idx_diff * 12.0))
+        index_score = max(0.0, min(1.0, 0.5 + idx_diff * 6.0))
         components["index_return"] = round(index_return, 4)
         components["index_momentum"] = round(index_score, 4)
     else:
@@ -2318,8 +2448,8 @@ def _compute_taiwan_etf_momentum(global_data: dict | None) -> FactorResult:
     sox_1d = global_data.get("sox_return", 0)
 
     # Use EWT primarily, fallback to 0050.TW
-    ret_20d = ewt_20d if (ewt_20d is not None and ewt_20d != 0) else tw50_20d
-    ret_60d = ewt_60d if (ewt_60d is not None and ewt_60d != 0) else tw50_60d
+    ret_20d = ewt_20d if ewt_20d is not None else tw50_20d
+    ret_60d = ewt_60d if ewt_60d is not None else tw50_60d
 
     if ret_20d is None:
         return FactorResult("taiwan_etf_momentum", 0.5, False, 0.0)
@@ -2345,7 +2475,7 @@ def _compute_taiwan_etf_momentum(global_data: dict | None) -> FactorResult:
 
     # 3. 0050.TW 本地動能 (15%)
     s_tw50 = 0.5
-    if tw50_20d is not None and tw50_20d != 0:
+    if tw50_20d is not None:
         s_tw50 = max(0.0, min(1.0, 0.5 + tw50_20d * 4.0))
         components["tw50_return_20d"] = round(tw50_20d, 4)
     components["tw50_score"] = round(s_tw50, 4)
@@ -2357,7 +2487,7 @@ def _compute_taiwan_etf_momentum(global_data: dict | None) -> FactorResult:
     components["relative_strength"] = round(s_rel, 4)
 
     total = s20 * 0.40 + s60 * 0.25 + s_tw50 * 0.15 + s_rel * 0.20
-    available = ret_20d != 0 or (ret_60d is not None and ret_60d != 0)
+    available = ret_20d is not None or ret_60d is not None
     return FactorResult(
         "taiwan_etf_momentum",
         round(total, 4),
@@ -2397,19 +2527,12 @@ def _compute_us_manufacturing(macro_data: dict | None) -> FactorResult:
     # 3. XLI vs 200d SMA (20%)
     s_sma = 0.5
     if xli_sma is not None:
-        if xli_sma > 0.05:
-            s_sma = 0.75
-        elif xli_sma > 0:
-            s_sma = 0.60
-        elif xli_sma > -0.05:
-            s_sma = 0.40
-        else:
-            s_sma = 0.25
+        s_sma = max(0.15, min(0.85, 0.5 + xli_sma * 3.5))
         components["xli_vs_sma200"] = round(xli_sma, 4)
     components["sma_score"] = round(s_sma, 4)
 
     total = s_ret * 0.40 + s_ratio * 0.40 + s_sma * 0.20
-    available = xli_ret != 0 or (xli_sma is not None and xli_sma != 0)
+    available = xli_ret is not None or xli_sma is not None
     return FactorResult(
         "us_manufacturing", round(total, 4), available, 0.9, components, raw_value=total
     )
@@ -2848,7 +2971,7 @@ def score_stock(
         _compute_technical_signal(signals, df_tech),
         _compute_multi_scale_momentum(df, df_tech),
         _compute_volume_anomaly(df, df_tech),
-        _compute_margin_sentiment(df),
+        _compute_margin_sentiment(df, stock_id),
         _compute_revenue_momentum(revenue_df),
         _compute_volatility_regime(df, df_tech),
         _compute_news_sentiment(sentiment_scores, sentiment_df, stock_id),
@@ -3316,7 +3439,7 @@ async def run_market_scan(top_n: int = 40) -> AsyncGenerator[str, None]:
                 if result is not None:
                     # Continuous sigmoid score (consistent with unified pipeline)
                     total_return = float(result.predicted_returns.sum())
-                    score = 1.0 / (1.0 + np.exp(-total_return * 50.0))
+                    score = 1.0 / (1.0 + np.exp(-total_return * ML_SIGMOID_GAIN))
                     ml_scores[sid] = max(0.05, min(0.95, score))
             except Exception as e:
                 logger.warning("ML predict failed for %s: %s", sid, e)
@@ -3352,6 +3475,22 @@ async def run_market_scan(top_n: int = 40) -> AsyncGenerator[str, None]:
         sector_data = _compute_sector_aggregates(stock_dfs, trust_lookup)
     except Exception as e:
         logger.warning("Sector aggregation failed: %s", e)
+
+    # Cache for single-stock analysis reuse
+    if sector_data:
+        try:
+            _serializable = {}
+            for k, v in sector_data.items():
+                if isinstance(v, dict):
+                    _serializable[k] = {
+                        sk: (float(sv) if isinstance(sv, (np.floating, np.integer)) else sv)
+                        for sk, sv in v.items()
+                    }
+                else:
+                    _serializable[k] = v
+            upsert_data_cache("sector_aggregates", today, json.dumps(_serializable))
+        except Exception as e:
+            logger.debug("Failed to cache sector_aggregates: %s", e)
 
     # ── Step 5.8: EX-DIVIDEND DETECTION (DB-first) ──────
     ex_div_set: set[str] = set()

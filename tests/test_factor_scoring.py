@@ -382,6 +382,13 @@ class TestMarginSentiment:
         result = _compute_margin_sentiment(df)
         assert result.available is False
 
+    def test_finance_dampened(self):
+        df = _make_df(60, with_margin=True)
+        result_normal = _compute_margin_sentiment(df)
+        result_finance = _compute_margin_sentiment(df, stock_id="2881")
+        assert abs(result_finance.score - 0.5) <= abs(result_normal.score - 0.5) + 0.001
+        assert result_finance.components.get("finance_dampened") is True
+
 
 class TestTrendMomentum:
     def test_basic(self):
@@ -790,31 +797,31 @@ class TestUSManufacturing:
         assert result.available is True
         assert result.score < 0.5
 
-    def test_sma200_tiers(self):
-        """Test different SMA200 level tiers"""
-        # Above 5% → 0.75
+    def test_sma200_smooth(self):
+        """Test smooth SMA200 scoring: max(0.15, min(0.85, 0.5 + xli_sma * 3.5))"""
+        # 0.08 → 0.5 + 0.28 = 0.78
         data = {
             "xli_return_20d": 0.0,
             "xli_vs_sma200": 0.08,
             "xli_spy_ratio_trend": 0.0,
         }
         result = _compute_us_manufacturing(data)
-        assert result.components["sma_score"] == 0.75
+        assert result.components["sma_score"] == 0.78
 
-        # 0-5% → 0.60
+        # 0.03 → 0.5 + 0.105 = 0.605
         data["xli_vs_sma200"] = 0.03
         result = _compute_us_manufacturing(data)
-        assert result.components["sma_score"] == 0.60
+        assert abs(result.components["sma_score"] - 0.605) < 0.01
 
-        # -5% to 0% → 0.40
+        # -0.03 → 0.5 - 0.105 = 0.395
         data["xli_vs_sma200"] = -0.03
         result = _compute_us_manufacturing(data)
-        assert result.components["sma_score"] == 0.40
+        assert abs(result.components["sma_score"] - 0.395) < 0.01
 
-        # Below -5% → 0.25
+        # -0.08 → 0.5 - 0.28 = 0.22
         data["xli_vs_sma200"] = -0.08
         result = _compute_us_manufacturing(data)
-        assert result.components["sma_score"] == 0.25
+        assert result.components["sma_score"] == 0.22
 
     def test_none(self):
         """No macro data → unavailable"""

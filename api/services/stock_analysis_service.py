@@ -36,6 +36,7 @@ from src.db.database import (
     get_sentiment,
     upsert_data_cache,
     get_data_cache,
+    get_data_cache_latest,
 )
 from src.analysis.technical import TechnicalAnalyzer
 from api.services.market_service import (
@@ -374,16 +375,17 @@ class StockAnalysisService:
         score_result = self._score(data, regime, ml_scores)
         avail_count = sum(1 for f in score_result.factors if f.available)
         logger.info(
-            "[Phase 3/6] 多因子評分 — 完成 (%.1fs) | 總分=%.3f 訊號=%s 信心=%.2f 可用因子=%d/20 regime=%s",
+            "[Phase 3/6] 多因子評分 — 完成 (%.1fs) | 總分=%.3f 訊號=%s 信心=%.2f 可用因子=%d/%d regime=%s",
             _time.perf_counter() - t0,
             score_result.total_score,
             score_result.signal,
             score_result.confidence,
             avail_count,
+            len(score_result.factors),
             regime,
         )
         # Build top/bottom factors for sub_steps
-        p3_steps = [f"可用因子: {avail_count}/20 (regime={regime})"]
+        p3_steps = [f"可用因子: {avail_count}/{len(score_result.factors)} (regime={regime})"]
         sorted_factors = sorted(
             [f for f in score_result.factors if f.available],
             key=lambda f: f.score,
@@ -717,7 +719,7 @@ class StockAnalysisService:
             logger.info("DB 無資料或不足 (%d筆), 全量抓取 %s", len(df), stock_id)
             try:
                 fetcher = StockFetcher()
-                start_date = today - timedelta(days=1900)
+                start_date = today - timedelta(days=3000)
                 new_df = await asyncio.to_thread(
                     fetcher.fetch_all,
                     stock_id,
@@ -1247,9 +1249,55 @@ credibility: 0.0~1.0 可信度:
             return "sideways"
 
     def _predict_ml(self, stock_id: str, df: pd.DataFrame) -> dict:
-        """ML model prediction — always retrain for freshest signal"""
+        """ML model prediction — use cached model if fresh, else retrain"""
         ml_scores = {}
         try:
+            # Check if a recent model exists (< 7 days old)
+            from src.models.trainer import ModelTrainer
+
+            report_path = MODEL_DIR / f"{stock_id}_training_report.json"
+            lstm_path = MODEL_DIR / f"{stock_id}_lstm.pt"
+            xgb_path = MODEL_DIR / f"{stock_id}_xgb.json"
+            model_fresh = False
+
+            if report_path.exists() and (lstm_path.exists() or xgb_path.exists()):
+                try:
+                    with open(report_path, encoding="utf-8") as f:
+                        report = json.load(f)
+                    trained_at = report.get("trained_at", "")
+                    if trained_at:
+                        from datetime import datetime
+
+                        trained_date = datetime.fromisoformat(trained_at).date()
+                        age_days = (date.today() - trained_date).days
+                        if age_days < 7:
+                            model_fresh = True
+                            logger.info(
+                                "ML model for %s is %d days old, using cached model",
+                                stock_id,
+                                age_days,
+                            )
+                except Exception:
+                    pass
+
+            if model_fresh:
+                # Load cached model and predict directly
+                trainer = ModelTrainer(stock_id)
+                trainer.load_models()
+                if trainer.lstm or trainer.xgb:
+                    today = date.today()
+                    result = trainer.predict(
+                        start_date=(today - timedelta(days=200)).isoformat(),
+                        end_date=today.isoformat(),
+                    )
+                    if result is not None:
+                        total_return = float(result.predicted_returns.sum())
+                        continuous_score = 1.0 / (1.0 + np.exp(-total_return * 50.0))
+                        continuous_score = max(0.05, min(0.95, continuous_score))
+                        ml_scores[stock_id] = continuous_score
+                        return ml_scores
+
+            # No fresh model — retrain
             trained = self._train_ml_quality(stock_id)
             if trained:
                 ml_scores.update(trained)
@@ -1265,7 +1313,7 @@ credibility: 0.0~1.0 可信度:
         try:
             fetcher = StockFetcher()
             end = date.today()
-            start = end - timedelta(days=1900)
+            start = end - timedelta(days=3000)
             full_df = fetcher.fetch_all(stock_id, start.isoformat(), end.isoformat())
             if not full_df.empty:
                 upsert_stock_prices(full_df, stock_id)
@@ -1301,7 +1349,7 @@ credibility: 0.0~1.0 可信度:
 
             trainer = ModelTrainer(stock_id)
             today = date.today()
-            start = today - timedelta(days=1900)
+            start = today - timedelta(days=3000)
 
             train_result = trainer.train(
                 start_date=start.isoformat(),
@@ -1382,14 +1430,20 @@ credibility: 0.0~1.0 可信度:
     def _score(self, data: StockData, regime: str, ml_scores: dict) -> ScoreResult:
         """20 因子加權評分 — 直接重用 market_service.score_stock()"""
 
-        # Prepare sector data for sector_rotation factor
+        # Prepare sector data for sector_rotation factor (prefer cached from market scan)
         sector_data = None
         try:
-            stock_dfs = {data.stock_id: data.df}
-            trust_lookup = {}
-            if data.trust_info:
-                trust_lookup[data.stock_id] = data.trust_info
-            sector_data = _compute_sector_aggregates(stock_dfs, trust_lookup)
+            cached_json = get_data_cache("sector_aggregates", date.today())
+            if not cached_json:
+                cached_json = get_data_cache_latest("sector_aggregates")
+            if cached_json:
+                sector_data = json.loads(cached_json)
+            else:
+                stock_dfs = {data.stock_id: data.df}
+                trust_lookup = {}
+                if data.trust_info:
+                    trust_lookup[data.stock_id] = data.trust_info
+                sector_data = _compute_sector_aggregates(stock_dfs, trust_lookup)
         except Exception:
             pass
 

@@ -220,11 +220,11 @@ class ModelTrainer:
         val_end = int(n * (1 - test_ratio))
 
         # Purge: 移除訓練集末尾與驗證集標籤重疊的樣本
-        purge_gap = 15  # max_holding(10) + embargo(5)
+        purge_gap = 10  # max_holding(10), no additional embargo
         effective_train_end = max(0, train_end - purge_gap)
         effective_val_end = max(0, val_end - purge_gap)
 
-        effective_val_start = train_end + purge_gap  # embargo: avoid label leakage
+        effective_val_start = train_end + purge_gap  # purge: avoid label leakage
         df_train = df.iloc[:effective_train_end]
         df_val = df.iloc[effective_val_start:effective_val_end]
         df_test = df.iloc[val_end:]
@@ -287,7 +287,7 @@ class ModelTrainer:
             self.lstm = LSTMPredictor(
                 input_size=len(self.feature_cols),
                 output_size=1,
-                use_attention=True,
+                use_attention=False,
             )
             lstm_history = self.lstm.train(
                 X_train_seq,
@@ -545,6 +545,10 @@ class ModelTrainer:
         start_date: str,
         end_date: str,
         min_direction_acc: float = 0.52,
+        # NOTE: Financial stocks (banks/insurance) typically achieve 50.3-50.9% with
+        # current technical-only features — below 0.52 threshold. This is expected.
+        # ml_ensemble falls back to 0.5 (neutral), weight redistributed.
+        # Future: add financial features (NIM, rates, dividend yield, P/B).
     ) -> dict:
         """Three-gate quality check before saving models.
 
