@@ -434,7 +434,8 @@ class EnsemblePredictor:
             combined_error = 0.02
 
         # CI in log-space: log-price uncertainty grows with sqrt(time)
-        log_std = combined_error * np.sqrt(np.arange(1, n_days + 1))
+        # 1.5x empirical factor: out-of-sample error is typically 1.5-2x in-sample
+        log_std = combined_error * 1.5 * np.sqrt(np.arange(1, n_days + 1))
         log_prices = np.log(predicted_prices)
         confidence_lower = np.exp(log_prices - 1.96 * log_std)
         confidence_upper = np.exp(log_prices + 1.96 * log_std)
@@ -541,12 +542,14 @@ class StackingEnsemble:
     輸入三個模型的 validation predictions，學習最佳組合權重。
     """
 
-    def __init__(self, alpha: float = 1.0):
+    def __init__(self, alpha: float = 5.0):
         from sklearn.linear_model import Ridge
 
+        self.alpha = alpha
         self.meta_learner = Ridge(alpha=alpha)
         self.is_fitted = False
         self.model_names: list[str] = []
+        self._use_simple_avg = False
 
     def fit(
         self,
@@ -561,6 +564,20 @@ class StackingEnsemble:
         """
         X_meta = np.column_stack(list(model_predictions.values()))
         self.model_names = list(model_predictions.keys())
+
+        # With only 2 base models and < 60 val samples, Ridge weights are unstable
+        # Fall back to simple equal-weight averaging
+        if len(y_true) < 60 and X_meta.shape[1] <= 2:
+            self._use_simple_avg = True
+            self.is_fitted = True
+            logger.info(
+                "StackingEnsemble: val samples=%d < 60 with %d models, "
+                "using simple average instead of Ridge",
+                len(y_true), X_meta.shape[1],
+            )
+            return
+
+        self._use_simple_avg = False
         self.meta_learner.fit(X_meta, y_true)
         self.is_fitted = True
 
@@ -575,6 +592,8 @@ class StackingEnsemble:
         if not self.is_fitted:
             raise RuntimeError("StackingEnsemble 尚未 fit")
         X_meta = np.column_stack([model_predictions[name] for name in self.model_names])
+        if self._use_simple_avg:
+            return X_meta.mean(axis=1)
         return self.meta_learner.predict(X_meta)
 
     def predict_with_signal(
@@ -598,9 +617,9 @@ class StackingEnsemble:
         ensemble_returns = self.predict(model_predictions)
         predicted_prices = current_price * np.cumprod(1 + ensemble_returns)
 
-        # CI
+        # CI (1.5x empirical factor for out-of-sample calibration)
         n_days = len(ensemble_returns)
-        log_std = 0.02 * np.sqrt(np.arange(1, n_days + 1))
+        log_std = 0.02 * 1.5 * np.sqrt(np.arange(1, n_days + 1))
         log_prices = np.log(predicted_prices)
         confidence_lower = np.exp(log_prices - 1.96 * log_std)
         confidence_upper = np.exp(log_prices + 1.96 * log_std)
@@ -654,6 +673,7 @@ class StackingEnsemble:
                 "meta_learner": self.meta_learner,
                 "model_names": self.model_names,
                 "is_fitted": self.is_fitted,
+                "_use_simple_avg": self._use_simple_avg,
             },
             path,
         )
@@ -672,4 +692,5 @@ class StackingEnsemble:
         self.meta_learner = data["meta_learner"]
         self.model_names = data["model_names"]
         self.is_fitted = data["is_fitted"]
+        self._use_simple_avg = data.get("_use_simple_avg", False)
         logger.info("StackingEnsemble 已載入自 %s", path)

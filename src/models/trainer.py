@@ -220,11 +220,12 @@ class ModelTrainer:
         val_end = int(n * (1 - test_ratio))
 
         # Purge: 移除訓練集末尾與驗證集標籤重疊的樣本
-        purge_gap = 10  # max_holding(10), no additional embargo
+        purge_gap = 10  # max_holding(10)
+        embargo = 5  # additional embargo (consistent with PurgedTimeSeriesSplit)
         effective_train_end = max(0, train_end - purge_gap)
         effective_val_end = max(0, val_end - purge_gap)
 
-        effective_val_start = train_end + purge_gap  # purge: avoid label leakage
+        effective_val_start = train_end + purge_gap + embargo  # purge + embargo: avoid label leakage
         df_train = df.iloc[:effective_train_end]
         df_val = df.iloc[effective_val_start:effective_val_end]
         df_test = df.iloc[val_end:]

@@ -37,6 +37,7 @@ dependencies = [
     # Utils
     "python-dotenv>=1.0",
     "pydantic>=2.7",
+    "cachetools>=5.3",
 ]
 
 [project.optional-dependencies]

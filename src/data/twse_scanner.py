@@ -327,23 +327,24 @@ class TWSEScanner:
         params = {"response": "json"}
 
         # TWSE 產業指數名稱 → 內部 sector key
+        # Uses substring matching, so partial names work across API format changes
         INDEX_MAP = {
-            "半導體類報酬指數": "semiconductor",
-            "電子類報酬指數": "electronics",
-            "金融保險類報酬指數": "finance",
-            "航運類報酬指數": "shipping",
-            "生技醫療類報酬指數": "biotech",
-            "電子零組件類報酬指數": "electronics",
-            "半導體類指數": "semiconductor",
-            "電子類指數": "electronics",
-            "金融保險類指數": "finance",
-            "航運類指數": "shipping",
-            "生技醫療類指數": "biotech",
-            "水泥類指數": "traditional",
-            "塑膠類指數": "traditional",
-            "紡織纖維類指數": "traditional",
-            "油電燃氣類指數": "green_energy",
-            "通信網路類指數": "telecom",
+            "半導體": "semiconductor",
+            "電子零組件": "electronic_parts",
+            "電子": "electronics",
+            "金融保險": "finance",
+            "航運": "shipping",
+            "生技醫療": "biotech",
+            "水泥": "traditional",
+            "塑膠": "traditional",
+            "紡織纖維": "traditional",
+            "油電燃氣": "green_energy",
+            "通信網路": "telecom",
+            "光電": "optoelectronics",
+            "鋼鐵": "steel",
+            "觀光餐旅": "tourism",
+            "電機機械": "machinery",
+            "化學": "chemical",
         }
 
         try:
@@ -366,6 +367,7 @@ class TWSEScanner:
 
             result: dict[str, float] = {}
             rows = data["data"]
+            unmatched = []
             for row in rows:
                 try:
                     index_name = row[0].strip()
@@ -375,6 +377,7 @@ class TWSEScanner:
                             sector = sec
                             break
                     if sector is None:
+                        unmatched.append(index_name)
                         continue
 
                     # row format: [指數名稱, 指數值, 漲跌點數, 漲跌百分比(%)]
@@ -402,6 +405,10 @@ class TWSEScanner:
                 except (ValueError, IndexError):
                     continue
 
+            if unmatched:
+                logger.debug(
+                    "TWSE industry indices unmatched names: %s", unmatched
+                )
             logger.info(
                 "TWSE industry indices: %s", {k: f"{v:.4f}" for k, v in result.items()}
             )

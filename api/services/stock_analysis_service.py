@@ -59,16 +59,19 @@ _training_locks: dict[str, threading.Lock] = {}
 _training_locks_guard = threading.Lock()
 
 # ── Per-stock daily caches (avoid redundant API calls) ────────────
-_trust_cache: dict[str, dict] = {}  # {stock_id: {"date": date, "data": dict}}
-_revenue_cache: dict[
-    str, dict
-] = {}  # {stock_id: {"date": date, "data": DataFrame|None}}
-_fundamental_cache: dict[
-    str, dict
-] = {}  # {stock_id: {"date": date, "data": dict|None}}
-_per_pbr_cache: dict[
-    str, dict
-] = {}  # {stock_id: {"date": date, "data": DataFrame|None}}
+# Use cachetools TTLCache to prevent unbounded memory growth in long-running servers
+try:
+    from cachetools import TTLCache
+
+    _trust_cache: dict[str, dict] = TTLCache(maxsize=200, ttl=86400)
+    _revenue_cache: dict[str, dict] = TTLCache(maxsize=200, ttl=86400)
+    _fundamental_cache: dict[str, dict] = TTLCache(maxsize=200, ttl=86400)
+    _per_pbr_cache: dict[str, dict] = TTLCache(maxsize=200, ttl=86400)
+except ImportError:
+    _trust_cache: dict[str, dict] = {}
+    _revenue_cache: dict[str, dict] = {}
+    _fundamental_cache: dict[str, dict] = {}
+    _per_pbr_cache: dict[str, dict] = {}
 
 
 # ═══════════════════════════════════════════════════════
@@ -185,7 +188,16 @@ def _sse_event(
     }
     if data is not None:
         payload["data"] = data
-    return f"data: {json.dumps(payload, ensure_ascii=False, default=str)}\n\n"
+    return f"data: {json.dumps(payload, ensure_ascii=False, default=_nan_safe_default)}\n\n"
+
+
+def _nan_safe_default(obj):
+    """JSON default handler that converts NaN/Inf to None, other types to str."""
+    import math as _math
+
+    if isinstance(obj, float) and (_math.isnan(obj) or _math.isinf(obj)):
+        return None
+    return str(obj)
 
 
 # ═══════════════════════════════════════════════════════

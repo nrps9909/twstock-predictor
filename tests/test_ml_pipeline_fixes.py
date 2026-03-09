@@ -156,7 +156,7 @@ class TestDirectionAccuracyClassify:
 
 class TestXGBoostAdaptiveParams:
     def test_small_dataset_relaxed(self):
-        """< 800 samples should get relaxed regularization"""
+        """< 800 samples should get stronger regularization"""
         np.random.seed(42)
         n = 500
         X = np.random.randn(n, 5).astype(np.float32)
@@ -165,9 +165,9 @@ class TestXGBoostAdaptiveParams:
         xgb = StockXGBoost()
         xgb.train(X, y)
 
-        # After adaptive adjustment
-        assert xgb.model.get_params()["max_depth"] == 5
-        assert xgb.model.get_params()["min_child_weight"] == 3
+        # After adaptive adjustment — stronger regularization for small datasets
+        assert xgb.model.get_params()["max_depth"] == 3
+        assert xgb.model.get_params()["min_child_weight"] == 8
 
     def test_large_dataset_defaults(self):
         """>= 2000 samples should keep default params"""

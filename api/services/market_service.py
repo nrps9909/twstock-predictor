@@ -4,6 +4,7 @@ import asyncio
 import calendar
 import json
 import logging
+import math
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 from io import StringIO
@@ -199,7 +200,6 @@ STOCK_SECTOR = {
     "1326": "traditional",
     "2002": "traditional",
     "1402": "traditional",
-    "2105": "traditional",
     # shipping
     "2603": "shipping",
     "2609": "shipping",
@@ -243,6 +243,60 @@ STOCK_SECTOR = {
     "2707": "tourism",  # 晶華
     "2702": "tourism",  # 華園
     "2706": "tourism",  # 第一店
+    # === 擴充：前100大市值覆蓋 ===
+    # semiconductor (additional)
+    "2363": "semiconductor",  # 矽統
+    "6415": "semiconductor",  # 矽力-KY
+    "5269": "semiconductor",  # 祥碩
+    "3707": "semiconductor",  # 漢磊
+    # electronics (additional)
+    "2357": "electronics",  # 華碩
+    "2324": "electronics",  # 仁寶
+    "3702": "electronics",  # 大聯大
+    "2354": "electronics",  # 鴻準
+    "2377": "electronics",  # 微星
+    "6239": "electronics",  # 力成
+    "3023": "electronics",  # 信邦
+    "6278": "electronics",  # 台表科
+    "4938": "electronics",  # 和碩
+    "3017": "electronics",  # 奇鋐
+    # finance (additional)
+    "2888": "finance",  # 新光金
+    "2889": "finance",  # 國票金
+    "2838": "finance",  # 聯邦銀
+    "2834": "finance",  # 臺企銀
+    "2823": "finance",  # 中壽
+    # traditional (additional — 傳產/食品/紡織/水泥)
+    "1216": "traditional",  # 統一
+    "2912": "traditional",  # 統一超
+    "1101": "traditional",  # 台泥
+    "1102": "traditional",  # 亞泥
+    "2207": "traditional",  # 和泰車
+    "9910": "traditional",  # 豐泰
+    "1227": "traditional",  # 佳格
+    "9921": "traditional",  # 巨大
+    "2801": "traditional",  # 彰銀
+    "1590": "traditional",  # 亞德客-KY
+    # shipping (additional)
+    "2634": "shipping",  # 漢翔
+    "2610": "shipping",  # 華航
+    "2611": "shipping",  # 長榮航
+    # green_energy (additional)
+    "6244": "green_energy",  # 茂迪
+    "3576": "green_energy",  # 聯合再生
+    "6469": "green_energy",  # 大樹
+    # electronic_parts (additional)
+    "6533": "electronic_parts",  # 晶心科
+    "3665": "electronic_parts",  # 貿聯-KY
+    "5904": "electronic_parts",  # 寶雅
+    # biotech (additional)
+    "4147": "biotech",  # 中裕
+    "6472": "biotech",  # 博錸
+    "1762": "biotech",  # 中化生
+    # rubber_auto (橡膠/汽車)
+    "2105": "rubber_auto",  # 正新
+    "1319": "rubber_auto",  # 東陽
+    "2227": "rubber_auto",  # 裕日車
 }
 
 DEFAULT_SECTOR = "other"
@@ -2193,8 +2247,8 @@ def _compute_margin_quality(
                     and float(tr0) != 0
                 ):
                     op_margin = float(operating_income.iloc[0]) / float(tr0)
-                # Smooth linear: op_margin -5%→0.20, 0%→0.35, 10%→0.60, 20%→0.80
-                level_score = max(0.20, min(0.85, 0.35 + op_margin * 2.5))
+                # Smooth linear: op_margin -10%→0.10, 0%→0.35, 10%→0.60, 20%→0.80
+                level_score = max(0.10, min(0.85, 0.35 + op_margin * 2.5))
                 components["op_margin"] = round(op_margin, 4)
                 components["level_score"] = round(level_score, 4)
 
@@ -2223,8 +2277,8 @@ def _compute_margin_quality(
             om_score = 0.5
             if om is not None:
                 components["operatingMargins"] = round(om, 4)
-                # Smooth linear: om 0%→0.35, om 10%→0.55, om 20%→0.75
-                om_score = max(0.20, min(0.85, 0.35 + om * 2.5))
+                # Smooth linear: om -10%→0.10, om 0%→0.35, om 10%→0.55, om 20%→0.75
+                om_score = max(0.10, min(0.85, 0.35 + om * 2.5))
             total = gm_score * 0.60 + om_score * 0.40
             return FactorResult(
                 "margin_quality",
@@ -3027,6 +3081,14 @@ def score_stock(
     else:
         signal = "hold"
 
+    # Limit-up/down detection: Taiwan stocks have ±10% daily limits
+    # Technical signals are unreliable at or near these limits
+    risk_notes = []
+    price_change_pct = stock_data.get("price_change_pct", 0)
+    if abs(price_change_pct) >= 9.5:
+        limit_dir = "漲停" if price_change_pct > 0 else "跌停"
+        risk_notes.append(f"{limit_dir}板 ({price_change_pct:+.1f}%)，技術指標不可靠")
+
     # Score coverage
     score_coverage = {f.name: f.available for f in factors}
     effective_coverage = round(
@@ -3091,6 +3153,8 @@ def score_stock(
         "reasoning": "；".join(reasons)
         if reasons
         else stock_data.get("reasoning", "資料不足"),
+        # Risk notes (limit-up/down, etc.)
+        "risk_notes": risk_notes,
         # Internal factors for IC tracking
         "_factors": factors,
     }
@@ -3198,7 +3262,14 @@ def _event(
     }
     if data is not None:
         payload["data"] = data
-    return f"data: {json.dumps(payload, ensure_ascii=False, default=str)}\n\n"
+    return f"data: {json.dumps(payload, ensure_ascii=False, default=_nan_safe_default)}\n\n"
+
+
+def _nan_safe_default(obj):
+    """JSON default handler that converts NaN/Inf to None, other types to str."""
+    if isinstance(obj, float) and (math.isnan(obj) or math.isinf(obj)):
+        return None
+    return str(obj)
 
 
 def rank_recommendations(results: list[dict]) -> dict:
@@ -3497,7 +3568,7 @@ async def run_market_scan(top_n: int = 40) -> AsyncGenerator[str, None]:
     try:
         start_div = (today - timedelta(days=5)).isoformat()
         end_div = (today + timedelta(days=2)).isoformat()
-        for sid in list(stock_dfs.keys())[:50]:
+        for sid in stock_dfs:
             cache_key = f"dividend:{sid}"
             div_df = None
             # DB-first

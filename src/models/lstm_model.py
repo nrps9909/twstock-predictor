@@ -103,19 +103,19 @@ class StockLSTM(nn.Module):
 
         # Regression head (return prediction)
         self.fc = nn.Sequential(
-            nn.Linear(hidden_size, 64),
+            nn.Linear(hidden_size, hidden_size),
             nn.ReLU(),
             nn.Dropout(dropout),
-            nn.Linear(64, output_size),
+            nn.Linear(hidden_size, output_size),
         )
 
         # Classification head (direction prediction: up/neutral/down)
         if use_classification:
             self.classifier = nn.Sequential(
-                nn.Linear(hidden_size, 32),
+                nn.Linear(hidden_size, hidden_size // 2),
                 nn.ReLU(),
                 nn.Dropout(dropout),
-                nn.Linear(32, n_classes),
+                nn.Linear(hidden_size // 2, n_classes),
             )
 
     def forward(
@@ -152,8 +152,8 @@ class LSTMPredictor:
     def __init__(
         self,
         input_size: int,
-        hidden_size: int = 64,
-        num_layers: int = 2,
+        hidden_size: int = 32,
+        num_layers: int = 1,
         dropout: float = 0.3,
         output_size: int = 1,
         lr: float = 5e-4,
@@ -282,11 +282,14 @@ class LSTMPredictor:
                 if self.use_classification and isinstance(output, tuple):
                     reg_pred, cls_logits = output
                     reg_loss = self.criterion(reg_pred, y_batch)
-                    cls_loss = (
-                        self.cls_criterion(cls_logits, cls_batch)
-                        if cls_batch is not None
-                        else 0.0
-                    )
+                    cls_loss = 0.0
+                    if cls_batch is not None:
+                        # Only apply classification loss on samples with clear direction
+                        clear_mask = y_batch.abs().squeeze(-1) > 0.5  # 0.5% in scaled space
+                        if clear_mask.any():
+                            cls_loss = self.cls_criterion(
+                                cls_logits[clear_mask], cls_batch[clear_mask]
+                            )
                     loss = reg_loss + self.cls_weight * cls_loss
                 else:
                     pred = output if not isinstance(output, tuple) else output[0]
@@ -308,11 +311,11 @@ class LSTMPredictor:
                 )
                 history["val_loss"].append(val_loss)
 
-                # Composite metric: lower is better (penalize wrong direction)
+                # Composite metric: lower is better (reward direction accuracy)
                 val_dir = self.evaluate_directional(
                     X_val, y_val, already_normalized=True
                 )
-                composite = val_loss - 0.1 * val_dir["direction_acc"]
+                composite = val_loss * (1.0 - 0.3 * val_dir["direction_acc"])
 
                 if composite < best_val_loss:
                     best_val_loss = composite
@@ -457,23 +460,30 @@ class LSTMPredictor:
         saved_input_size = arch.get("input_size")
         saved_use_cls = arch.get("use_classification", False)
 
+        saved_hidden = arch.get("hidden_size", self.model.hidden_size)
+        saved_layers = arch.get("num_layers", self.model.num_layers)
+        saved_attn = arch.get("use_attention", self.model.use_attention)
+
         if saved_input_size and (
             saved_input_size != self.model.lstm.input_size
             or saved_use_cls != self.model.use_classification
+            or saved_hidden != self.model.hidden_size
+            or saved_layers != self.model.num_layers
+            or saved_attn != self.model.use_attention
         ):
             logger.info(
-                "Rebuilding LSTM: checkpoint input_size=%d cls=%s, current=%d cls=%s",
-                saved_input_size,
-                saved_use_cls,
-                self.model.lstm.input_size,
-                self.model.use_classification,
+                "Rebuilding LSTM: checkpoint(input=%d, hidden=%d, layers=%d, attn=%s, cls=%s) "
+                "vs current(input=%d, hidden=%d, layers=%d, attn=%s, cls=%s)",
+                saved_input_size, saved_hidden, saved_layers, saved_attn, saved_use_cls,
+                self.model.lstm.input_size, self.model.hidden_size,
+                self.model.num_layers, self.model.use_attention, self.model.use_classification,
             )
             self.use_classification = saved_use_cls
             self.model = StockLSTM(
                 input_size=saved_input_size,
-                hidden_size=arch.get("hidden_size", self.model.hidden_size),
-                num_layers=arch.get("num_layers", self.model.num_layers),
-                use_attention=arch.get("use_attention", self.model.use_attention),
+                hidden_size=saved_hidden,
+                num_layers=saved_layers,
+                use_attention=saved_attn,
                 use_classification=saved_use_cls,
             ).to(self.device)
             self.optimizer = torch.optim.Adam(self.model.parameters())

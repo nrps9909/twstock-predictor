@@ -243,8 +243,12 @@ def insert_sentiment(records: list[dict]):
     """批次寫入情緒紀錄"""
     with get_session() as session:
         for rec in records:
+            rec = dict(rec)  # avoid mutating caller's dict
+            # Map crawler field name 'link' → model field name 'url'
+            if "link" in rec:
+                rec["url"] = rec.pop("link")
             if "as_of_date" not in rec:
-                rec = {**rec, "as_of_date": date.today()}
+                rec["as_of_date"] = date.today()
             session.add(SentimentRecord(**rec))
 
 
@@ -1386,5 +1390,20 @@ def get_data_cache(cache_key: str, cache_date: date) -> str | None:
                 DataCache.cache_key == cache_key,
                 DataCache.cache_date == cache_date,
             )
+        ).scalar_one_or_none()
+        return row.data_json if row else None
+
+
+def get_data_cache_latest(cache_key: str) -> str | None:
+    """Return the most recent cached JSON for *cache_key*, regardless of date.
+
+    Useful for weekend/holiday fallback when today's cache doesn't exist.
+    """
+    with get_session() as session:
+        row = session.execute(
+            select(DataCache)
+            .where(DataCache.cache_key == cache_key)
+            .order_by(DataCache.cache_date.desc())
+            .limit(1)
         ).scalar_one_or_none()
         return row.data_json if row else None

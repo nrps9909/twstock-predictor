@@ -69,12 +69,19 @@ class StockXGBoost:
 
         # Adaptive hyperparameters based on sample size
         n = len(X_train)
-        if n < 800:
+        if n < 200:
             self.model.set_params(
-                max_depth=5, min_child_weight=3, reg_lambda=0.5, gamma=0.05
+                max_depth=2, min_child_weight=10, reg_lambda=3.0, gamma=0.3
             )
             logger.info(
-                "XGBoost adaptive params: small dataset (%d), relaxed regularization", n
+                "XGBoost adaptive params: ultra-small dataset (%d), max regularization", n
+            )
+        elif n < 800:
+            self.model.set_params(
+                max_depth=3, min_child_weight=8, reg_lambda=2.0, gamma=0.2
+            )
+            logger.info(
+                "XGBoost adaptive params: small dataset (%d), stronger regularization", n
             )
         elif n < 2000:
             self.model.set_params(

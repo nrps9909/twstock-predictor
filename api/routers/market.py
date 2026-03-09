@@ -13,6 +13,30 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/market", tags=["market"])
 
+# Prevent concurrent market scans from causing data races
+_scan_lock = asyncio.Lock()
+
+
+async def _with_keepalive(sse_gen, interval: float = 25.0):
+    """Wrap an async SSE generator with periodic keepalive comments.
+
+    Prevents browsers/proxies from dropping the connection during long phases
+    (feature extraction, LLM calls) that may take 60+ seconds without events.
+    """
+    import time
+
+    last_event = time.monotonic()
+    aiter = sse_gen.__aiter__()
+    while True:
+        try:
+            chunk = await asyncio.wait_for(aiter.__anext__(), timeout=interval)
+            last_event = time.monotonic()
+            yield chunk
+        except asyncio.TimeoutError:
+            yield ": keepalive\n\n"
+        except StopAsyncIteration:
+            break
+
 
 def _sanitize_nan(obj):
     """Replace NaN/Inf floats with None for JSON serialization."""
@@ -27,9 +51,20 @@ def _sanitize_nan(obj):
 
 @router.post("/scan")
 async def scan_market(top_n: int = 40):
-    """觸發全市場掃描 (SSE 串流)"""
+    """觸發全市場掃描 (SSE 串流) — 同一時間只允許一個掃描"""
+    if _scan_lock.locked():
+        return JSONResponse(
+            status_code=409,
+            content={"detail": "另一個掃描正在進行中，請稍後再試"},
+        )
+
+    async def _guarded_scan():
+        async with _scan_lock:
+            async for chunk in run_market_scan(top_n=top_n):
+                yield chunk
+
     return StreamingResponse(
-        run_market_scan(top_n=top_n),
+        _with_keepalive(_guarded_scan()),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -184,7 +219,7 @@ async def analyze_stock(stock_id: str, stock_name: str = ""):
     from api.services.stock_analysis_service import analyze_stock as _analyze
 
     return StreamingResponse(
-        _analyze(stock_id, stock_name),
+        _with_keepalive(_analyze(stock_id, stock_name)),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",

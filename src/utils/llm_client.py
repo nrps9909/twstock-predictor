@@ -43,14 +43,30 @@ def _clean_env() -> dict[str, str]:
     return env
 
 
+def _kill_proc_tree(pid: int) -> None:
+    """Windows: 殺死整個進程樹 (claude.cmd → node → ...)"""
+    try:
+        subprocess.run(
+            ["taskkill", "/T", "/F", "/PID", str(pid)],
+            capture_output=True,
+            timeout=5,
+        )
+    except Exception:
+        pass
+
+
 def _call_cli_sync(
     prompt: str,
     model: str,
     timeout: float,
     system_prompt: str,
 ) -> str:
-    """透過 claude -p CLI 呼叫（每次呼叫直接嘗試，不預設閘門）"""
-    # prompt 作為命令行參數（不用 stdin）
+    """透過 claude -p CLI 呼叫（每次呼叫直接嘗試，不預設閘門）
+
+    使用 Popen + 手動 timeout，確保 Windows 上能殺死整個進程樹。
+    subprocess.run timeout 只殺 parent (claude.cmd)，
+    node 子進程會繼續持有 pipe 導致永久阻塞。
+    """
     cmd = [
         _CLAUDE_PATH,
         "-p",
@@ -66,37 +82,50 @@ def _call_cli_sync(
     ]
     env = _clean_env()
 
+    proc = subprocess.Popen(
+        cmd,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=env,
+    )
     try:
-        result = subprocess.run(
-            cmd,
-            stdin=subprocess.DEVNULL,
-            capture_output=True,
-            timeout=timeout,
-            env=env,
-        )
-        out_text = result.stdout.decode("utf-8", errors="replace").strip()
-        err_text = result.stderr.decode("utf-8", errors="replace").strip()
-
-        if result.returncode != 0:
-            raise RuntimeError(
-                f"claude -p 失敗 (code {result.returncode}): "
-                f"{err_text or out_text or '(no output)'}"
-            )
-
-        # Parse JSON wrapper: {"type":"result","result":"..."}
-        if out_text:
-            try:
-                data = json.loads(out_text)
-                if isinstance(data, dict) and "result" in data:
-                    if data.get("is_error"):
-                        raise RuntimeError(f"claude -p 錯誤: {data.get('result')}")
-                    return data["result"]
-            except json.JSONDecodeError:
-                pass
-        return out_text
-
+        out_bytes, err_bytes = proc.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
+        _kill_proc_tree(proc.pid)
+        proc.kill()
+        # 關閉 pipe 避免被子進程 handle 阻塞
+        for pipe in (proc.stdout, proc.stderr):
+            try:
+                pipe.close()
+            except Exception:
+                pass
+        try:
+            proc.wait(timeout=5)
+        except Exception:
+            pass
         raise TimeoutError(f"claude -p 逾時 ({timeout}s)")
+
+    out_text = out_bytes.decode("utf-8", errors="replace").strip()
+    err_text = err_bytes.decode("utf-8", errors="replace").strip()
+
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"claude -p 失敗 (code {proc.returncode}): "
+            f"{err_text or out_text or '(no output)'}"
+        )
+
+    # Parse JSON wrapper: {"type":"result","result":"..."}
+    if out_text:
+        try:
+            data = json.loads(out_text)
+            if isinstance(data, dict) and "result" in data:
+                if data.get("is_error"):
+                    raise RuntimeError(f"claude -p 錯誤: {data.get('result')}")
+                return data["result"]
+        except json.JSONDecodeError:
+            pass
+    return out_text
 
 
 # ── Public API ─────────────────────────────────────────
