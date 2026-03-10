@@ -9,20 +9,18 @@ echo   twstock-predictor [DEV MODE]
 echo ============================================
 echo.
 
-:: Kill leftover processes on port 8000 and 3000
+:: Kill leftover processes on port 8000 and 3000 (/T = kill entire process tree)
 echo   Cleaning up old processes...
 for /f "tokens=5" %%a in ('netstat -aon ^| findstr ":8000 " ^| findstr "LISTENING"') do (
     echo   Killing PID %%a on port 8000
-    taskkill /F /PID %%a 2>nul
+    taskkill /T /F /PID %%a 2>nul
 )
 for /f "tokens=5" %%a in ('netstat -aon ^| findstr ":3000 " ^| findstr "LISTENING"') do (
     echo   Killing PID %%a on port 3000
-    taskkill /F /PID %%a 2>nul
+    taskkill /T /F /PID %%a 2>nul
 )
-:: Kill any orphaned uvicorn processes by command line match
-wmic process where "commandline like '%%uvicorn%%api.main%%'" call terminate >nul 2>&1
-:: Clear Python bytecode cache to ensure fresh code loads
-for /f "delims=" %%d in ('dir /s /b /ad __pycache__ 2^>nul') do rd /s /q "%%d" 2>nul
+:: Kill any orphaned claude CLI (node) processes spawned by the API
+taskkill /F /IM node.exe /FI "WINDOWTITLE eq claude*" 2>nul
 timeout /t 1 /nobreak >nul
 
 echo.
@@ -46,10 +44,10 @@ timeout /t 5 /nobreak >nul
 :: Start frontend in foreground — Ctrl+C kills npm, then we clean up API
 cd web && npm run dev
 
-:: After frontend exits (Ctrl+C or close), kill leftover API
+:: After frontend exits (Ctrl+C or close), kill leftover API + subprocess tree
 echo.
 echo   Shutting down API...
 for /f "tokens=5" %%a in ('netstat -aon ^| findstr ":8000 " ^| findstr "LISTENING"') do (
-    taskkill /F /PID %%a >nul 2>&1
+    taskkill /T /F /PID %%a >nul 2>&1
 )
 echo   Done.

@@ -33,9 +33,9 @@ def compute_atr(
 
 def triple_barrier_label(
     df: pd.DataFrame,
-    upper_multiplier: float = 2.0,
-    lower_multiplier: float = 2.0,
-    max_holding: int = 10,
+    upper_multiplier: float = 1.5,
+    lower_multiplier: float = 1.5,
+    max_holding: int = 15,
     atr_window: int = 14,
 ) -> pd.Series:
     """Triple Barrier 標籤
@@ -106,9 +106,9 @@ def triple_barrier_label(
 
 def triple_barrier_classify(
     df: pd.DataFrame,
-    upper_multiplier: float = 2.0,
-    lower_multiplier: float = 2.0,
-    max_holding: int = 10,
+    upper_multiplier: float = 1.5,
+    lower_multiplier: float = 1.5,
+    max_holding: int = 15,
     atr_window: int = 14,
 ) -> pd.Series:
     """Triple Barrier 分類標籤（離散版）
@@ -126,6 +126,12 @@ def triple_barrier_classify(
 
     atr = compute_atr(df["high"], df["low"], df["close"], window=atr_window)
     atr_vals = atr.values
+
+    # Data-driven noise threshold: adapts to stock volatility
+    close_safe = np.maximum(close[:-1], 1e-8)
+    daily_returns = np.diff(close) / close_safe
+    daily_returns = daily_returns[np.isfinite(daily_returns)]
+    noise_threshold = max(0.003, float(np.median(np.abs(daily_returns)) * 0.5))
 
     labels = np.full(n, np.nan)
 
@@ -155,9 +161,12 @@ def triple_barrier_classify(
                 break
 
         if not touched:
-            # 到期方向
+            # 到期方向 — only assign direction if return exceeds noise threshold
             ret = (close[end_idx] - entry_price) / entry_price
-            labels[i] = 1 if ret > 0 else (-1 if ret < 0 else 0)
+            if abs(ret) < noise_threshold:
+                labels[i] = 0  # genuinely neutral (ambiguous direction)
+            else:
+                labels[i] = 1 if ret > 0 else -1
 
     return pd.Series(labels, index=df.index, name="tb_class")
 
@@ -165,7 +174,7 @@ def triple_barrier_classify(
 def compute_sample_weights(
     df: pd.DataFrame,
     label_col: str = "tb_label",
-    max_holding: int = 10,
+    max_holding: int = 15,
 ) -> pd.Series:
     """計算樣本唯一性權重（Average Uniqueness）
 
@@ -194,11 +203,22 @@ def compute_sample_weights(
     # 避免除零
     concurrency = np.maximum(concurrency, 1)
 
-    # 每個樣本的平均唯一性
-    weights = np.ones(n)
+    # 每個樣本的平均唯一性 × temporal decay (recent samples matter more)
+    # Half-life = 504 trading days (~2 years): gradual decay
+    half_life = 504
+    decay_rate = np.log(2) / half_life
+    temporal_weight = np.exp(decay_rate * (np.arange(n) - n + 1))  # last sample = 1.0
+
+    # NaN-label samples get weight 0 (no training signal)
+    weights = np.zeros(n)
     for i in valid_indices:
         end = min(i + max_holding, n - 1)
         avg_uniqueness = np.mean(1.0 / concurrency[i : end + 1])
-        weights[i] = avg_uniqueness
+        weights[i] = avg_uniqueness * temporal_weight[i]
+
+    # Normalize to mean=1 so XGBoost min_child_weight thresholds still work
+    w_mean = weights[valid_indices].mean()
+    if w_mean > 0:
+        weights[valid_indices] *= 1.0 / w_mean
 
     return pd.Series(weights, index=df.index, name="sample_weight")

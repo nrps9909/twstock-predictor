@@ -11,6 +11,8 @@ import os
 import re
 import shutil
 import subprocess
+import threading
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -61,11 +63,12 @@ def _call_cli_sync(
     timeout: float,
     system_prompt: str,
 ) -> str:
-    """透過 claude -p CLI 呼叫（每次呼叫直接嘗試，不預設閘門）
+    """透過 claude -p CLI 呼叫，使用 watchdog timer 確保可靠超時。
 
-    使用 Popen + 手動 timeout，確保 Windows 上能殺死整個進程樹。
-    subprocess.run timeout 只殺 parent (claude.cmd)，
-    node 子進程會繼續持有 pipe 導致永久阻塞。
+    communicate(timeout=) 在 Windows 上有已知問題：TimeoutExpired 後
+    子進程 (node.js) 繼續持有 pipe handle，導致清理永久阻塞。
+    改用 threading.Timer watchdog：從獨立線程強制殺死整個進程樹，
+    pipe handle 釋放後 communicate() 自然返回。
     """
     cmd = [
         _CLAUDE_PATH,
@@ -78,36 +81,77 @@ def _call_cli_sync(
         model,
         "--system-prompt",
         system_prompt,
-        prompt,
     ]
     env = _clean_env()
 
+    logger.info(
+        "claude -p: model=%s, len=%d, timeout=%.0fs",
+        model,
+        len(prompt),
+        timeout,
+    )
+    t0 = time.perf_counter()
+
     proc = subprocess.Popen(
         cmd,
-        stdin=subprocess.DEVNULL,
+        stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         env=env,
     )
-    try:
-        out_bytes, err_bytes = proc.communicate(timeout=timeout)
-    except subprocess.TimeoutExpired:
+
+    # Watchdog: force-kill process tree + close pipes after timeout.
+    # On Windows, orphaned node.js children can hold pipe handles open,
+    # preventing communicate() from returning even after the parent is dead.
+    # Closing pipes from the watchdog thread forces communicate() to error out.
+    killed = threading.Event()
+
+    def _force_kill():
+        killed.set()
+        logger.warning("claude -p watchdog 觸發: 強制終止 (pid=%s)", proc.pid)
         _kill_proc_tree(proc.pid)
-        proc.kill()
-        # 關閉 pipe 避免被子進程 handle 阻塞
-        for pipe in (proc.stdout, proc.stderr):
-            try:
-                pipe.close()
-            except Exception:
-                pass
         try:
-            proc.wait(timeout=5)
-        except Exception:
+            proc.kill()
+        except OSError:
             pass
+        # Force-close pipes to unblock communicate() on Windows
+        for pipe in (proc.stdin, proc.stdout, proc.stderr):
+            if pipe:
+                try:
+                    pipe.close()
+                except OSError:
+                    pass
+
+    timer = threading.Timer(timeout, _force_kill)
+    timer.daemon = True
+    timer.start()
+
+    try:
+        out_bytes, err_bytes = proc.communicate(input=prompt.encode("utf-8"))
+    except (OSError, ValueError):
+        # Pipes closed by watchdog — expected on timeout
+        out_bytes, err_bytes = b"", b""
+    except Exception:
+        if killed.is_set():
+            raise TimeoutError(f"claude -p 逾時 ({timeout}s)")
+        raise
+    finally:
+        timer.cancel()
+
+    elapsed = time.perf_counter() - t0
+
+    if killed.is_set():
         raise TimeoutError(f"claude -p 逾時 ({timeout}s)")
 
     out_text = out_bytes.decode("utf-8", errors="replace").strip()
     err_text = err_bytes.decode("utf-8", errors="replace").strip()
+
+    logger.info(
+        "claude -p 完成: rc=%s, len=%d, %.1fs",
+        proc.returncode,
+        len(out_text),
+        elapsed,
+    )
 
     if proc.returncode != 0:
         raise RuntimeError(
@@ -141,6 +185,7 @@ async def call_claude(
 
     預設 timeout 60s（CLI 冷啟動約需 20-40s）。
     """
+    logger.info("call_claude: 提交到線程池 (model=%s, len=%d)", model, len(prompt))
     return await asyncio.to_thread(
         _call_cli_sync,
         prompt,

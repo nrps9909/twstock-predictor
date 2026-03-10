@@ -566,14 +566,18 @@ class TestMLQualityTraining:
                 mock_train.assert_called_once_with("9999")
                 assert result == {"9999": 0.75}
 
-    def test_predict_ml_always_retrains(self, service):
-        """_predict_ml should always retrain for freshest signal"""
-        with patch.object(
-            service, "_train_ml_quality", return_value={"2330": 0.75}
-        ) as mock_train:
-            result = service._predict_ml("2330", pd.DataFrame())
-            mock_train.assert_called_once_with("2330")
-            assert result == {"2330": 0.75}
+    def test_predict_ml_no_cached_model_retrains(self, service):
+        """_predict_ml should retrain when no cached model exists"""
+        with patch("api.services.stock_analysis_service.MODEL_DIR") as mock_dir:
+            mock_path = MagicMock()
+            mock_path.exists.return_value = False
+            mock_dir.__truediv__ = lambda self, key: mock_path
+            with patch.object(
+                service, "_train_ml_quality", return_value={"2330": 0.75}
+            ) as mock_train:
+                result = service._predict_ml("2330", pd.DataFrame())
+                mock_train.assert_called_once_with("2330")
+                assert result == {"2330": 0.75}
 
     def test_train_ml_quality_insufficient_data(self, service):
         """Training with insufficient data should return empty dict gracefully"""
@@ -588,16 +592,25 @@ class TestMLQualityTraining:
         """ML quality training always retrains for freshest signal"""
         mock_pred = MagicMock()
         mock_pred.signal = "buy"
-        mock_pred.predicted_returns = pd.Series([0.02])
+        mock_pred.predicted_returns = np.array([0.02])
 
         with patch("src.models.trainer.ModelTrainer") as MockTrainer:
             trainer_inst = MockTrainer.return_value
+            # train_sector is called for stocks in STOCK_SECTOR (2330 = semiconductor)
+            trainer_inst.train_sector.return_value = {
+                "quality_gate": {"overall_passed": True},
+            }
             trainer_inst.train.return_value = {
                 "quality_gate": {"overall_passed": True},
             }
             trainer_inst.predict.return_value = mock_pred
+            # New code checks xgb_cls first; set to None so it falls back to predict()
+            trainer_inst.xgb_cls = None
+            trainer_inst._xgb_cls_fresh = None
+            trainer_inst.feature_cols = []
             result = service._train_ml_quality("2330")
-            trainer_inst.train.assert_called_once()
+            # 2330 is in STOCK_SECTOR → calls train_sector
+            trainer_inst.train_sector.assert_called_once()
             assert "2330" in result
             assert 0.0 < result["2330"] < 1.0
 

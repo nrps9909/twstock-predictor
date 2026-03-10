@@ -22,20 +22,30 @@ async def _with_keepalive(sse_gen, interval: float = 25.0):
 
     Prevents browsers/proxies from dropping the connection during long phases
     (feature extraction, LLM calls) that may take 60+ seconds without events.
-    """
-    import time
 
-    last_event = time.monotonic()
+    Uses asyncio.wait() instead of asyncio.wait_for() to avoid cancelling the
+    underlying generator when a keepalive timeout fires.
+    """
     aiter = sse_gen.__aiter__()
     while True:
+        next_task = asyncio.ensure_future(aiter.__anext__())
         try:
-            chunk = await asyncio.wait_for(aiter.__anext__(), timeout=interval)
-            last_event = time.monotonic()
-            yield chunk
-        except asyncio.TimeoutError:
-            yield ": keepalive\n\n"
+            while True:
+                done, _ = await asyncio.wait({next_task}, timeout=interval)
+                if done:
+                    break
+                yield ": keepalive\n\n"
+            yield next_task.result()
         except StopAsyncIteration:
-            break
+            return
+        except GeneratorExit:
+            next_task.cancel()
+            try:
+                await next_task
+            except (asyncio.CancelledError, StopAsyncIteration):
+                pass
+            await aiter.aclose()
+            return
 
 
 def _sanitize_nan(obj):

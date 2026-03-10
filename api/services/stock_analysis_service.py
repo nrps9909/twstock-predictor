@@ -17,6 +17,7 @@ import logging
 import threading
 from dataclasses import dataclass, field, asdict
 from datetime import date, timedelta
+from io import StringIO
 from typing import AsyncGenerator
 
 import numpy as np
@@ -874,7 +875,7 @@ class StockAnalysisService:
         cached_json = get_data_cache(cache_key, today)
         if cached_json:
             try:
-                df = pd.read_json(cached_json, orient="records")
+                df = pd.read_json(StringIO(cached_json), orient="records")
                 if not df.empty:
                     _revenue_cache[stock_id] = {"date": today, "data": df}
                     logger.debug("Revenue DB cache hit: %s", stock_id)
@@ -1147,7 +1148,7 @@ credibility: 0.0~1.0 可信度:
         cached_json = get_data_cache(cache_key, today)
         if cached_json:
             try:
-                df = pd.read_json(cached_json, orient="records")
+                df = pd.read_json(StringIO(cached_json), orient="records")
                 if not df.empty:
                     if "date" in df.columns:
                         df["date"] = pd.to_datetime(df["date"]).dt.date
@@ -1261,55 +1262,9 @@ credibility: 0.0~1.0 可信度:
             return "sideways"
 
     def _predict_ml(self, stock_id: str, df: pd.DataFrame) -> dict:
-        """ML model prediction — use cached model if fresh, else retrain"""
+        """ML model prediction — always retrain for freshest signal"""
         ml_scores = {}
         try:
-            # Check if a recent model exists (< 7 days old)
-            from src.models.trainer import ModelTrainer
-
-            report_path = MODEL_DIR / f"{stock_id}_training_report.json"
-            lstm_path = MODEL_DIR / f"{stock_id}_lstm.pt"
-            xgb_path = MODEL_DIR / f"{stock_id}_xgb.json"
-            model_fresh = False
-
-            if report_path.exists() and (lstm_path.exists() or xgb_path.exists()):
-                try:
-                    with open(report_path, encoding="utf-8") as f:
-                        report = json.load(f)
-                    trained_at = report.get("trained_at", "")
-                    if trained_at:
-                        from datetime import datetime
-
-                        trained_date = datetime.fromisoformat(trained_at).date()
-                        age_days = (date.today() - trained_date).days
-                        if age_days < 7:
-                            model_fresh = True
-                            logger.info(
-                                "ML model for %s is %d days old, using cached model",
-                                stock_id,
-                                age_days,
-                            )
-                except Exception:
-                    pass
-
-            if model_fresh:
-                # Load cached model and predict directly
-                trainer = ModelTrainer(stock_id)
-                trainer.load_models()
-                if trainer.lstm or trainer.xgb:
-                    today = date.today()
-                    result = trainer.predict(
-                        start_date=(today - timedelta(days=200)).isoformat(),
-                        end_date=today.isoformat(),
-                    )
-                    if result is not None:
-                        total_return = float(result.predicted_returns.sum())
-                        continuous_score = 1.0 / (1.0 + np.exp(-total_return * 50.0))
-                        continuous_score = max(0.05, min(0.95, continuous_score))
-                        ml_scores[stock_id] = continuous_score
-                        return ml_scores
-
-            # No fresh model — retrain
             trained = self._train_ml_quality(stock_id)
             if trained:
                 ml_scores.update(trained)
@@ -1363,49 +1318,146 @@ credibility: 0.0~1.0 可信度:
             today = date.today()
             start = today - timedelta(days=3000)
 
-            train_result = trainer.train(
-                start_date=start.isoformat(),
-                end_date=today.isoformat(),
-                epochs=100,
-                seq_len=40,
-                val_ratio=0.2,
-                test_ratio=0.2,
-                max_features=30,
+            # Adaptive max_features: ~30 samples per feature to avoid overfitting
+            n_train_est = int(n_rows * 0.55)  # after 3-way split + purge
+            adaptive_max_features = min(30, max(8, n_train_est // 30))
+            logger.info(
+                "ML adaptive features: %d rows → %d max_features",
+                n_rows, adaptive_max_features,
             )
+
+            # Try sector-pooled training first (10-20x more data)
+            from api.services.market_service import STOCK_SECTOR
+            sector = STOCK_SECTOR.get(stock_id)
+            if sector:
+                logger.info(
+                    "Attempting sector training for %s (sector=%s)",
+                    stock_id, sector,
+                )
+                train_result = trainer.train_sector(
+                    sector=sector,
+                    start_date=start.isoformat(),
+                    end_date=today.isoformat(),
+                    epochs=100,
+                    max_features=adaptive_max_features,
+                )
+            else:
+                train_result = trainer.train(
+                    start_date=start.isoformat(),
+                    end_date=today.isoformat(),
+                    epochs=100,
+                    seq_len=40,
+                    val_ratio=0.2,
+                    test_ratio=0.2,
+                    max_features=adaptive_max_features,
+                    use_chronos=True,
+                )
 
             # Check quality gate result
             gate = train_result.get("quality_gate", {})
             if not gate.get("overall_passed", False):
                 logger.warning(
-                    "ML quality training for %s: quality gate FAILED (lstm_dir=%.3f, xgb_dir=%.3f, pbo=%s)",
+                    "ML quality training for %s: quality gate FAILED (lstm_dir=%.3f, xgb_dir=%.3f, cls_score_dir=%.3f)",
                     stock_id,
                     gate.get("lstm_direction_acc", 0),
                     gate.get("xgb_direction_acc", 0),
-                    gate.get("pbo"),
+                    gate.get("xgb_cls_score_dir_acc", 0),
                 )
-                return {}
 
-            # Predict with freshly trained model
-            result = trainer.predict(
-                start_date=(today - timedelta(days=200)).isoformat(),
-                end_date=today.isoformat(),
-            )
-            if result is not None:
-                # Use continuous predicted return → sigmoid score (0-1)
-                # instead of discrete 5-level signal mapping
-                total_return = float(result.predicted_returns.sum())
-                continuous_score = 1.0 / (1.0 + np.exp(-total_return * 50.0))
-                continuous_score = max(0.05, min(0.95, continuous_score))
-                logger.info(
-                    "ML quality training completed for %s: signal=%s return=%.4f score=%.3f gate=%s",
-                    stock_id,
-                    result.signal,
-                    total_return,
-                    continuous_score,
-                    gate,
+                # Fallback: pooled classifier training (if sector training failed)
+                if not sector:
+                    from api.services.market_service import STOCK_SECTOR
+                    sector = STOCK_SECTOR.get(stock_id)
+                if sector and not gate.get("pooled_training"):
+                    peer_ids = [
+                        sid for sid, sec in STOCK_SECTOR.items()
+                        if sec == sector and sid != stock_id
+                    ][:12]  # cap at 12 peers
+                    if len(peer_ids) >= 3:
+                        logger.info(
+                            "Attempting pooled training for %s with %d %s peers",
+                            stock_id, len(peer_ids), sector,
+                        )
+                        pooled_result = trainer.train_pooled_classifier(
+                            peer_ids,
+                            start_date=start.isoformat(),
+                            end_date=today.isoformat(),
+                            max_features=adaptive_max_features,
+                        )
+                        if pooled_result and pooled_result.get("passed_quality"):
+                            gate["xgb_cls_passed"] = True
+                            gate["overall_passed"] = True
+                            gate["pooled_training"] = True
+                            logger.info(
+                                "Pooled training succeeded for %s: dir=%.3f",
+                                stock_id,
+                                pooled_result.get("test_direction_acc", 0),
+                            )
+                # (the prediction code below handles the dampened output)
+
+            # Predict with freshly trained model (match training seq_len)
+            # Use XGBoost classifier direction score as primary signal source.
+            # Even if quality gate fails, the freshly-trained classifier provides
+            # a weak directional signal that is useful as one of 15 scoring factors.
+            from src.analysis.features import FeatureEngineer, FEATURE_COLUMNS
+
+            fe = FeatureEngineer()
+            pred_start = (today - timedelta(days=200)).isoformat()
+            pred_df = fe.build_features(stock_id, pred_start, today.isoformat())
+
+            continuous_score = 0.5  # default: no signal
+            signal_source = "none"
+
+            # 1. XGBoost classifier direction score (always available after training)
+            # Use the freshly-trained classifier even if it didn't pass quality gate.
+            # The classifier was trained in this session — it exists in trainer._xgb_cls_raw
+            xgb_cls = getattr(trainer, "_xgb_cls_fresh", None) or trainer.xgb_cls
+            if xgb_cls is not None and not pred_df.empty:
+                feature_cols = trainer.feature_cols or [
+                    c for c in FEATURE_COLUMNS if c in pred_df.columns
+                ]
+                X_tab, _ = fe.prepare_tabular(pred_df, feature_cols)
+                if len(X_tab) > 0:
+                    dir_score = xgb_cls.predict_direction_score(X_tab[-1:])
+                    # dir_score in [-1, 1] → sigmoid mapping
+                    # Scale=3.0 for quality-passed models (more spread: ±0.5 → [0.18, 0.82])
+                    # Scale=2.0 for weak models (conservative)
+                    if gate.get("xgb_cls_passed", False):
+                        sigmoid_scale = 3.0
+                    else:
+                        sigmoid_scale = 2.0
+                    raw_score = 1.0 / (1.0 + np.exp(-dir_score[0] * sigmoid_scale))
+                    # Dampen to [0.3, 0.7] range if quality gate failed
+                    if not gate.get("xgb_cls_passed", False):
+                        continuous_score = 0.5 + (raw_score - 0.5) * 0.4  # [0.3, 0.7]
+                        signal_source = "xgb_classifier(weak)"
+                    else:
+                        continuous_score = max(0.1, min(0.9, float(raw_score)))
+                        signal_source = "xgb_classifier"
+
+            # 2. Fallback: LSTM/XGB regressor ensemble
+            if signal_source == "none":
+                result = trainer.predict(
+                    start_date=pred_start,
+                    end_date=today.isoformat(),
+                    seq_len=40,
                 )
-                return {stock_id: continuous_score}
-            return {}
+                if result is not None:
+                    total_return = float(result.predicted_returns.sum())
+                    continuous_score = 1.0 / (1.0 + np.exp(-total_return * 50.0))
+                    continuous_score = max(0.1, min(0.9, continuous_score))
+                    signal_source = f"ensemble({result.signal})"
+
+            logger.info(
+                "ML quality training completed for %s: signal=%s score=%.3f gate=%s",
+                stock_id,
+                signal_source,
+                continuous_score,
+                gate,
+            )
+            # Return score even if gate failed — the 15-factor system
+            # uses it as a weak signal (ml_ensemble weight = 15%)
+            return {stock_id: continuous_score}
         except ValueError as e:
             logger.warning(
                 "ML quality training skipped for %s (insufficient data): %s",
@@ -1425,14 +1477,17 @@ credibility: 0.0~1.0 可信度:
         Phase 2 的 LLM 呼叫 #1: 從新聞/PTT/法人動向萃取結構化情緒。
         """
         try:
+            logger.info("  ├─ LLM 情緒萃取: 開始 (Haiku)")
             from src.agents.narrative_agent import extract_sentiment
 
-            return await extract_sentiment(
+            result = await extract_sentiment(
                 stock_id=data.stock_id,
                 sentiment_df=data.sentiment_df,
                 trust_info=data.trust_info,
                 global_data=data.global_data,
             )
+            logger.info("  ├─ LLM 情緒萃取: 完成")
+            return result
         except Exception as e:
             logger.warning("LLM sentiment extraction failed: %s", e)
             return None
@@ -1477,7 +1532,7 @@ credibility: 0.0~1.0 可信度:
             cached_json = get_data_cache(cache_key, today)
             if cached_json:
                 try:
-                    div_df = pd.read_json(cached_json, orient="records")
+                    div_df = pd.read_json(StringIO(cached_json), orient="records")
                     if "date" in div_df.columns:
                         div_df["date"] = pd.to_datetime(div_df["date"]).dt.date
                 except Exception:

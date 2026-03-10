@@ -28,19 +28,21 @@ class TestSelectFeatures:
             {
                 "close": [100, 101, 102, 103, 104] * 20,
                 "volume": range(100),
+                "return_1d": np.random.normal(0, 0.01, 100),
                 "tb_label": np.random.normal(0, 0.01, 100),
             }
         )
         selected = fe.select_features(df, max_features=50)
-        # 只有 close 和 volume 在 FEATURE_COLUMNS 中
-        available = [c for c in FEATURE_COLUMNS if c in df.columns]
-        assert selected == available
+        # Only stationary features in FEATURE_COLUMNS are kept (close is non-stationary)
+        assert "volume" in selected
+        assert len(selected) >= 1
 
     def test_shap_method(self, fe, sample_features_df):
         selected = fe.select_features(
             sample_features_df, max_features=10, method="shap"
         )
-        assert len(selected) <= 10
+        # max_features + up to 3 force-included return features
+        assert len(selected) <= 13
 
     def test_persist_importance(self, fe, sample_features_df, session_factory):
         """select_features 持久化重要性分數到 DB"""

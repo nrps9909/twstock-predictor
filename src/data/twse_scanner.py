@@ -318,13 +318,12 @@ class TWSEScanner:
     def fetch_industry_indices(self) -> dict[str, float]:
         """抓取 TWSE 產業指數報酬率
 
-        TWSE 公開 API: /rwd/zh/TAIEX/MI_5MINS_INDEX
+        TWSE 公開 API: /rwd/zh/afterTrading/MI_INDEX?type=IND (每日收盤產業指數)
         回傳: {semiconductor: return_pct, finance: return_pct, ...}
         """
-        _rate_limiter.wait()
+        import re
 
-        url = "https://www.twse.com.tw/rwd/zh/TAIEX/MI_5MINS_INDEX"
-        params = {"response": "json"}
+        url = "https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX"
 
         # TWSE 產業指數名稱 → 內部 sector key
         # Uses substring matching, so partial names work across API format changes
@@ -347,7 +346,17 @@ class TWSEScanner:
             "化學": "chemical",
         }
 
-        try:
+        # Time pattern to detect MI_5MINS_INDEX-style rows (HH:MM:SS)
+        _time_pattern = re.compile(r"^\d{2}:\d{2}:\d{2}$")
+
+        def _try_fetch_date(target_date: date) -> dict[str, float] | None:
+            """Attempt to fetch industry indices for a specific date."""
+            _rate_limiter.wait()
+            params = {
+                "response": "json",
+                "date": target_date.strftime("%Y%m%d"),
+                "type": "IND",
+            }
             resp = requests.get(
                 url,
                 params=params,
@@ -361,16 +370,39 @@ class TWSEScanner:
             resp.raise_for_status()
             data = resp.json()
 
-            if data.get("stat") != "OK" or "data" not in data:
-                logger.warning("TWSE MI_5MINS_INDEX: %s", data.get("stat", "no data"))
-                return {}
+            if data.get("stat") != "OK":
+                logger.debug(
+                    "TWSE MI_INDEX %s: %s",
+                    target_date,
+                    data.get("stat", "no data"),
+                )
+                return None
+
+            # afterTrading/MI_INDEX uses "tables" array, not top-level "data"
+            tables = data.get("tables", [])
+            rows = []
+            for table in tables:
+                table_data = table.get("data", [])
+                if table_data:
+                    rows.extend(table_data)
+
+            # Fallback: some API versions may use top-level "data"
+            if not rows:
+                rows = data.get("data", [])
 
             result: dict[str, float] = {}
-            rows = data["data"]
+            if not rows:
+                return None
+
             unmatched = []
             for row in rows:
                 try:
-                    index_name = row[0].strip()
+                    index_name = str(row[0]).strip()
+
+                    # Skip time-format rows (from MI_5MINS_INDEX-style data)
+                    if _time_pattern.match(index_name):
+                        continue
+
                     sector = None
                     for pattern, sec in INDEX_MAP.items():
                         if pattern in index_name:
@@ -380,18 +412,19 @@ class TWSEScanner:
                         unmatched.append(index_name)
                         continue
 
-                    # row format: [指數名稱, 指數值, 漲跌點數, 漲跌百分比(%)]
-                    # Some TWSE responses have different column counts
+                    # afterTrading format: [指數, 收盤指數, 漲跌(+/-), 漲跌點數, 漲跌百分比(%)]
                     change_pct = None
-                    for col_idx in [3, 2]:
+                    for col_idx in [4, 3, 2]:
                         try:
+                            raw = str(row[col_idx])
+                            # Strip HTML tags (e.g. <p style='color:green'>-</p>)
+                            val = re.sub(r"<[^>]+>", "", raw)
                             val = (
-                                str(row[col_idx])
-                                .replace(",", "")
+                                val.replace(",", "")
                                 .replace("%", "")
                                 .strip()
                             )
-                            if val and val not in ("--", ""):
+                            if val and val not in ("--", "-", ""):
                                 change_pct = float(val)
                                 break
                         except (ValueError, IndexError):
@@ -400,7 +433,7 @@ class TWSEScanner:
                     if change_pct is not None:
                         # Keep first match per sector (higher priority index)
                         if sector not in result:
-                            result[sector] = change_pct / 100.0  # Convert to decimal
+                            result[sector] = change_pct / 100.0
 
                 except (ValueError, IndexError):
                     continue
@@ -409,10 +442,33 @@ class TWSEScanner:
                 logger.debug(
                     "TWSE industry indices unmatched names: %s", unmatched
                 )
-            logger.info(
-                "TWSE industry indices: %s", {k: f"{v:.4f}" for k, v in result.items()}
-            )
-            return result
+
+            return result if result else None
+
+        try:
+            # Try today first, then fall back to previous 5 business days
+            today = date.today()
+            for i in range(6):
+                candidate = today - timedelta(days=i)
+                if candidate.weekday() >= 5:  # Skip weekends
+                    continue
+                try:
+                    result = _try_fetch_date(candidate)
+                    if result:
+                        logger.info(
+                            "TWSE industry indices (%s): %s",
+                            candidate,
+                            {k: f"{v:.4f}" for k, v in result.items()},
+                        )
+                        return result
+                except Exception as e:
+                    logger.debug(
+                        "TWSE MI_INDEX %s failed: %s", candidate, e
+                    )
+                    continue
+
+            logger.warning("TWSE industry indices: no data found in last 6 days")
+            return {}
 
         except Exception as e:
             logger.warning("TWSE industry indices fetch failed: %s", e)

@@ -26,15 +26,20 @@ class DirectionAwareLoss(nn.Module):
     quality gate's direction_accuracy metric.
     """
 
-    def __init__(self, delta: float = 2.0, direction_weight: float = 0.2):
+    def __init__(self, delta: float = 2.0, direction_weight: float = 0.5):
         super().__init__()
         self.huber = nn.HuberLoss(delta=delta)
-        self.dw = direction_weight
+        self.direction_weight = direction_weight
 
     def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
         reg_loss = self.huber(pred, target)
-        wrong_dir = (pred * target < 0).float().mean()
-        return reg_loss + self.dw * wrong_dir
+        # Filter near-zero targets to avoid noise diluting the direction signal
+        significant = target.abs() > 0.1  # 0.1% in scaled space
+        if significant.any():
+            wrong_dir = (pred[significant] * target[significant] < 0).float().mean()
+        else:
+            wrong_dir = torch.tensor(0.0, device=pred.device)
+        return reg_loss * (1.0 + self.direction_weight * wrong_dir)
 
 
 class AttentionLayer(nn.Module):
@@ -176,9 +181,9 @@ class LSTMPredictor:
         self.optimizer = torch.optim.AdamW(
             self.model.parameters(), lr=lr, weight_decay=1e-4
         )
-        self.criterion = DirectionAwareLoss(delta=2.0, direction_weight=0.2)
+        self.criterion = DirectionAwareLoss(delta=2.0, direction_weight=0.5)
         self.cls_criterion = nn.CrossEntropyLoss() if use_classification else None
-        self.cls_weight = 0.3  # weight for classification loss in dual-task
+        self.cls_weight = 0.5  # weight for classification loss in dual-task
         self.target_scale = 100.0  # work in percentage space
         self.scaler_mean: np.ndarray | None = None
         self.scaler_std: np.ndarray | None = None
@@ -225,6 +230,8 @@ class LSTMPredictor:
         Returns:
             {"train_loss": [...], "val_loss": [...]}
         """
+        # Adaptive patience: scale with epochs to avoid wasting too many rounds
+        patience = max(15, epochs // 5)
         X_train = self._normalize(X_train, fit=True)
         if X_val is not None:
             X_val = self._normalize(X_val)
@@ -262,6 +269,7 @@ class LSTMPredictor:
         best_val_loss = float("inf")
         best_model_state = None
         epochs_no_improve = 0
+        direction_bonus = 0.0  # calibrated on first epoch to ~10% of val_loss scale
 
         for epoch in range(epochs):
             self.model.train()
@@ -285,7 +293,9 @@ class LSTMPredictor:
                     cls_loss = 0.0
                     if cls_batch is not None:
                         # Only apply classification loss on samples with clear direction
-                        clear_mask = y_batch.abs().squeeze(-1) > 0.5  # 0.5% in scaled space
+                        clear_mask = (
+                            y_batch.abs().squeeze(-1) > 0.2
+                        )  # 0.2% in scaled space
                         if clear_mask.any():
                             cls_loss = self.cls_criterion(
                                 cls_logits[clear_mask], cls_batch[clear_mask]
@@ -312,10 +322,14 @@ class LSTMPredictor:
                 history["val_loss"].append(val_loss)
 
                 # Composite metric: lower is better (reward direction accuracy)
+                # Additive form ensures monotonicity — higher dir_acc always helps
                 val_dir = self.evaluate_directional(
                     X_val, y_val, already_normalized=True
                 )
-                composite = val_loss * (1.0 - 0.3 * val_dir["direction_acc"])
+                if direction_bonus == 0.0 and val_loss > 0:
+                    # Clamp to prevent large val_loss from masking poor models
+                    direction_bonus = min(val_loss * 0.2, 0.01)
+                composite = val_loss - direction_bonus * val_dir["direction_acc"]
 
                 if composite < best_val_loss:
                     best_val_loss = composite
@@ -474,9 +488,16 @@ class LSTMPredictor:
             logger.info(
                 "Rebuilding LSTM: checkpoint(input=%d, hidden=%d, layers=%d, attn=%s, cls=%s) "
                 "vs current(input=%d, hidden=%d, layers=%d, attn=%s, cls=%s)",
-                saved_input_size, saved_hidden, saved_layers, saved_attn, saved_use_cls,
-                self.model.lstm.input_size, self.model.hidden_size,
-                self.model.num_layers, self.model.use_attention, self.model.use_classification,
+                saved_input_size,
+                saved_hidden,
+                saved_layers,
+                saved_attn,
+                saved_use_cls,
+                self.model.lstm.input_size,
+                self.model.hidden_size,
+                self.model.num_layers,
+                self.model.use_attention,
+                self.model.use_classification,
             )
             self.use_classification = saved_use_cls
             self.model = StockLSTM(

@@ -24,6 +24,7 @@ dependencies = [
     "pytorch-forecasting>=1.0",
     "lightning>=2.2",
     "hmmlearn>=0.3",         # HMM 市場狀態偵測
+    "chronos-forecasting>=2.0",  # Chronos-2 pretrained time series model
 
     # Database
     "sqlalchemy>=2.0",

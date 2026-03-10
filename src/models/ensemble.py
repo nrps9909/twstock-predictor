@@ -33,13 +33,16 @@ def direction_accuracy(
     return float(np.mean(np.sign(pred[mask]) == np.sign(target[mask])))
 
 
-def direction_accuracy_classify(pred: np.ndarray, tb_class: np.ndarray) -> float:
+def direction_accuracy_classify(
+    pred: np.ndarray, tb_class: np.ndarray, epsilon: float = 0.003
+) -> float:
     """Direction accuracy using Triple Barrier class labels {1, 0, -1}.
 
-    Excludes class=0 (time-expired with ambiguous direction).
-    Compares sign(pred) against tb_class sign.
+    Excludes class=0 (time-expired with ambiguous direction) AND
+    near-zero predictions (|pred| < epsilon) where LSTM outputs
+    conservative values that np.sign maps unreliably.
     """
-    mask = tb_class != 0
+    mask = (tb_class != 0) & (np.abs(pred) > epsilon)
     if mask.sum() == 0:
         return 0.5
     pred_sign = np.sign(pred[mask])

@@ -488,6 +488,14 @@ def _fetch_yfinance_with_fallback(ticker: str, period: str = "5d"):
     return pd.DataFrame()
 
 
+def _sanitize_for_json(d: dict, default: float = 0.0) -> dict:
+    """Replace NaN/Inf with default value for JSON serialization."""
+    return {
+        k: default if isinstance(v, float) and (math.isnan(v) or math.isinf(v)) else v
+        for k, v in d.items()
+    }
+
+
 def _fetch_global_market_data() -> dict:
     """取得前一交易日全球市場數據 (yfinance), DB-first + 每日快取
 
@@ -509,7 +517,13 @@ def _fetch_global_market_data() -> dict:
         except (json.JSONDecodeError, TypeError):
             pass
 
-    result = {}
+    result = {
+        "sox_return": 0.0, "sox_5d": 0.0,
+        "tsm_return": 0.0, "tsm_5d": 0.0,
+        "ewt_return_1d": 0.0, "ewt_return_20d": 0.0, "ewt_return_60d": 0.0,
+        "tw50_return_20d": 0.0, "tw50_return_60d": 0.0,
+        "asml_return": 0.0, "asml_5d": 0.0,
+    }
     try:
         for ticker, key in [("^SOX", "sox"), ("TSM", "tsm")]:
             hist = _fetch_yfinance_with_fallback(ticker, "10d")
@@ -537,30 +551,28 @@ def _fetch_global_market_data() -> dict:
         else:
             result["ewt_return_1d"] = 0.0
             last_close = 0.0
-        if len(hist) >= 21:
+        if len(hist) >= 21 and last_close > 0:
             close_20d_ago = float(hist["Close"].iloc[-21])
-            result["ewt_return_20d"] = (last_close - close_20d_ago) / close_20d_ago
-        else:
-            result["ewt_return_20d"] = 0.0
-        if len(hist) >= 61:
+            if close_20d_ago > 0:
+                result["ewt_return_20d"] = (last_close - close_20d_ago) / close_20d_ago
+        if len(hist) >= 61 and last_close > 0:
             close_60d_ago = float(hist["Close"].iloc[-61])
-            result["ewt_return_60d"] = (last_close - close_60d_ago) / close_60d_ago
-        else:
-            result["ewt_return_60d"] = 0.0
+            if close_60d_ago > 0:
+                result["ewt_return_60d"] = (last_close - close_60d_ago) / close_60d_ago
 
         # 0050.TW (元大台灣50) — 本地替代 / EWT fallback
         hist = _fetch_yfinance_with_fallback("0050.TW", "90d")
-        if len(hist) >= 21:
+        tw50_last = 0.0
+        if len(hist) >= 1:
             tw50_last = float(hist["Close"].iloc[-1])
+        if len(hist) >= 21 and tw50_last > 0:
             close_20d_ago = float(hist["Close"].iloc[-21])
-            result["tw50_return_20d"] = (tw50_last - close_20d_ago) / close_20d_ago
-        else:
-            result["tw50_return_20d"] = 0.0
-        if len(hist) >= 61:
+            if close_20d_ago > 0:
+                result["tw50_return_20d"] = (tw50_last - close_20d_ago) / close_20d_ago
+        if len(hist) >= 61 and tw50_last > 0:
             close_60d_ago = float(hist["Close"].iloc[-61])
-            result["tw50_return_60d"] = (tw50_last - close_60d_ago) / close_60d_ago
-        else:
-            result["tw50_return_60d"] = 0.0
+            if close_60d_ago > 0:
+                result["tw50_return_60d"] = (tw50_last - close_60d_ago) / close_60d_ago
 
         # ASML (半導體設備領先指標)
         hist = _fetch_yfinance_with_fallback("ASML", "10d")
@@ -602,7 +614,7 @@ def _fetch_global_market_data() -> dict:
     _global_cache["date"] = today
     _global_cache["data"] = result
     try:
-        upsert_data_cache("global_market", today, json.dumps(result))
+        upsert_data_cache("global_market", today, json.dumps(_sanitize_for_json(result)))
     except Exception as e:
         logger.warning("Failed to save global_market cache to DB: %s", e)
     return result
@@ -626,7 +638,12 @@ def _fetch_macro_data() -> dict:
         except (json.JSONDecodeError, TypeError):
             pass
 
-    result: dict = {}
+    result: dict = {
+        "vix": 20.0, "usdtwd_trend": 0.0, "tnx_change": 0.0,
+        "xli_return_20d": 0.0, "xli_vs_sma200": 0.0,
+        "yield_curve_spread": 0.0, "yield_curve_change": 0.0, "fvx": 0.0,
+        "copper_return_20d": 0.0, "xli_spy_ratio_trend": 0.0,
+    }
     try:
         import yfinance as yf
 
@@ -755,7 +772,7 @@ def _fetch_macro_data() -> dict:
     _macro_cache["date"] = today
     _macro_cache["data"] = result
     try:
-        upsert_data_cache("macro_risk", today, json.dumps(result))
+        upsert_data_cache("macro_risk", today, json.dumps(_sanitize_for_json(result)))
     except Exception as e:
         logger.warning("Failed to save macro_risk cache to DB: %s", e)
     return result
@@ -1776,10 +1793,10 @@ def _compute_ml_ensemble(ml_scores: dict, stock_id: str) -> FactorResult:
         return FactorResult("ml_ensemble", 0.5, False, 0.0)
 
     raw_score = ml_scores[stock_id]
-    # Quality gate: dampen extreme predictions (cap deviation from 0.5 at 0.35)
+    # Quality gate: dampen extreme predictions (cap deviation from 0.5 at 0.40)
     # This prevents ML from dominating when it's very confident but possibly overfit
     deviation = raw_score - 0.5
-    max_deviation = 0.35  # score range [0.15, 0.85]
+    max_deviation = 0.40  # score range [0.10, 0.90]
     dampened = 0.5 + max(-max_deviation, min(max_deviation, deviation))
 
     components = {
@@ -2888,8 +2905,15 @@ def _compute_confidence(
     else:
         agreement = 0.0
 
-    # 2. Signal strength 30%
-    strength = abs(total_score - 0.5) * 2
+    # 2. Signal strength 30% — hybrid of magnitude and factor dispersion
+    magnitude = abs(total_score - 0.5) * 2
+    # Factor dispersion: range of available factor scores reflects signal polarization
+    if available_factors:
+        factor_scores = [f.score for f in available_factors]
+        dispersion = max(factor_scores) - min(factor_scores)
+    else:
+        dispersion = 0.0
+    strength = max(magnitude, dispersion * 0.5)
 
     # 3. Data coverage 25%: sum of base weights for available factors
     coverage = sum(BASE_WEIGHTS.get(f.name, 0) for f in available_factors)

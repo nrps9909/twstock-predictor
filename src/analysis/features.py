@@ -72,6 +72,17 @@ FEATURE_COLUMNS = [
     "day_of_week",
     "month",
     "is_settlement",
+    # Tier 3: 相對特徵（穩態化，取代絕對價格）
+    "close_to_sma5",
+    "close_to_sma20",
+    "close_to_sma60",
+    "bb_position",
+    "volume_to_ma20",
+    "margin_change_5d",
+    "short_change_5d",
+    "institutional_net_ratio",
+    "momentum_12_1",
+    "return_vol_ratio",
 ]
 
 # Legacy target (保留向後相容)
@@ -149,30 +160,35 @@ class FeatureEngineer:
         df = self._add_microstructure_features(df)
         df = self._add_calendar_features(df)
 
+        # Tier 3: 相對特徵（穩態化）
+        df = self._add_relative_features(df)
+
         # 計算 target: 未來 5 日報酬率（legacy，保留向後相容）
         df[TARGET_COLUMN] = df["close"].pct_change(5).shift(-5)
 
         # Triple Barrier 標籤（主要 target）
+        # ATR×1.0 + 7-day holding: shorter horizon = more barrier touches,
+        # less noise accumulation, better match for technical feature predictability.
         df[TB_TARGET_COLUMN] = triple_barrier_label(
             df,
-            upper_multiplier=2.0,
-            lower_multiplier=2.0,
-            max_holding=10,
+            upper_multiplier=1.0,
+            lower_multiplier=1.0,
+            max_holding=7,
             atr_window=14,
         )
 
         # Triple Barrier classification labels (for direction accuracy eval)
         df["tb_class"] = triple_barrier_classify(
             df,
-            upper_multiplier=2.0,
-            lower_multiplier=2.0,
-            max_holding=10,
+            upper_multiplier=1.0,
+            lower_multiplier=1.0,
+            max_holding=7,
             atr_window=14,
         )
 
         # 樣本唯一性權重
         df[TB_WEIGHT_COLUMN] = compute_sample_weights(
-            df, label_col=TB_TARGET_COLUMN, max_holding=10
+            df, label_col=TB_TARGET_COLUMN, max_holding=7
         )
 
         # 填充缺失值
@@ -237,6 +253,91 @@ class FeatureEngineer:
 
         return df
 
+    def _add_relative_features(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Tier 3: 相對特徵 — 穩態化取代絕對價格
+
+        These are stationary transformations of price-level features,
+        far more predictive for ML models than raw prices.
+        """
+        close = df["close"]
+
+        # Price-to-SMA ratios (mean-reversion signals)
+        if "sma_5" in df.columns:
+            sma5 = df["sma_5"].replace(0, np.nan)
+            df["close_to_sma5"] = (close / sma5 - 1).clip(-0.2, 0.2)
+        else:
+            df["close_to_sma5"] = 0.0
+
+        if "sma_20" in df.columns:
+            sma20 = df["sma_20"].replace(0, np.nan)
+            df["close_to_sma20"] = (close / sma20 - 1).clip(-0.3, 0.3)
+        else:
+            df["close_to_sma20"] = 0.0
+
+        if "sma_60" in df.columns:
+            sma60 = df["sma_60"].replace(0, np.nan)
+            df["close_to_sma60"] = (close / sma60 - 1).clip(-0.5, 0.5)
+        else:
+            df["close_to_sma60"] = 0.0
+
+        # Bollinger band position (0=lower band, 1=upper band)
+        if "bb_upper" in df.columns and "bb_lower" in df.columns:
+            bb_range = (df["bb_upper"] - df["bb_lower"]).replace(0, np.nan)
+            df["bb_position"] = ((close - df["bb_lower"]) / bb_range).clip(-0.5, 1.5)
+        else:
+            df["bb_position"] = 0.5
+
+        # Volume relative to 20-day average
+        if "volume" in df.columns:
+            vol_ma20 = df["volume"].rolling(20).mean().replace(0, np.nan)
+            df["volume_to_ma20"] = (df["volume"] / vol_ma20).clip(0, 5.0)
+        else:
+            df["volume_to_ma20"] = 1.0
+
+        # Margin balance change (leverage direction signal)
+        if "margin_balance" in df.columns:
+            df["margin_change_5d"] = (
+                df["margin_balance"].pct_change(5, fill_method=None).clip(-1, 1)
+            )
+        else:
+            df["margin_change_5d"] = 0.0
+
+        # Short balance change (short selling pressure)
+        if "short_balance" in df.columns:
+            df["short_change_5d"] = (
+                df["short_balance"].pct_change(5, fill_method=None).clip(-1, 1)
+            )
+        else:
+            df["short_change_5d"] = 0.0
+
+        # Institutional net buy ratio (most powerful signal for TWSE)
+        if "foreign_buy_sell" in df.columns and "volume" in df.columns:
+            trust = df.get("trust_buy_sell", pd.Series(0, index=df.index))
+            if not isinstance(trust, pd.Series):
+                trust = pd.Series(0, index=df.index)
+            vol_safe = df["volume"].replace(0, np.nan)
+            net_inst = df["foreign_buy_sell"] + trust
+            df["institutional_net_ratio"] = (net_inst / vol_safe).clip(-1, 1)
+        else:
+            df["institutional_net_ratio"] = 0.0
+
+        # Momentum factor: 12-month return minus 1-month return (classic Jegadeesh-Titman)
+        if "return_1d" in df.columns:
+            ret_240d = close.pct_change(240)
+            ret_20d = close.pct_change(20)
+            df["momentum_12_1"] = (ret_240d - ret_20d).clip(-1, 1)
+        else:
+            df["momentum_12_1"] = 0.0
+
+        # Return-to-volatility ratio (Sharpe-like signal)
+        if "return_5d" in df.columns and "realized_vol_5d" in df.columns:
+            vol_safe = df["realized_vol_5d"].replace(0, np.nan)
+            df["return_vol_ratio"] = (df["return_5d"] / vol_safe).clip(-5, 5)
+        else:
+            df["return_vol_ratio"] = 0.0
+
+        return df
+
     # ── 合併與填充 ──────────────────────────────────────
 
     def _merge_sentiment(
@@ -297,7 +398,7 @@ class FeatureEngineer:
             "short_balance",
         ]:
             if col in df.columns:
-                df[col] = df[col].ffill().fillna(0)
+                df[col] = df[col].ffill(limit=5).fillna(0)
 
         # 新增特徵填 0
         for col in [
@@ -309,6 +410,17 @@ class FeatureEngineer:
             "day_of_week",
             "month",
             "is_settlement",
+            # Tier 3 relative features
+            "close_to_sma5",
+            "close_to_sma20",
+            "close_to_sma60",
+            "bb_position",
+            "volume_to_ma20",
+            "margin_change_5d",
+            "short_change_5d",
+            "institutional_net_ratio",
+            "momentum_12_1",
+            "return_vol_ratio",
         ]:
             if col in df.columns:
                 df[col] = df[col].fillna(0)
@@ -346,7 +458,17 @@ class FeatureEngineer:
         Returns:
             篩選後的特徵欄位清單
         """
-        available_cols = [c for c in FEATURE_COLUMNS if c in df.columns]
+        # Exclude non-stationary absolute price features from selection
+        # (they create spurious correlations across different price regimes)
+        _NON_STATIONARY = {"close", "open", "high", "low", "sma_5", "sma_20", "sma_60",
+                           "bb_upper", "bb_lower"}
+        # Force-include return features — they are the strongest predictors
+        # for direction in walk-forward validation (0.55+ direction accuracy)
+        _FORCE_INCLUDE = {"return_1d", "return_5d", "return_20d"}
+        available_cols = [
+            c for c in FEATURE_COLUMNS
+            if c in df.columns and c not in _NON_STATIONARY
+        ]
         valid = df.dropna(subset=[target_col])
 
         if len(valid) < 50 or len(available_cols) <= max_features:
@@ -366,6 +488,11 @@ class FeatureEngineer:
         else:
             selected = self._select_by_mi(X, y, available_cols, max_features)
 
+        # Force-include critical features even if MI/SHAP didn't rank them high
+        for force_col in _FORCE_INCLUDE:
+            if force_col in available_cols and force_col not in selected:
+                selected.append(force_col)
+
         # 持久化重要性分數
         if session_factory is not None and stock_id is not None:
             self._persist_importance(
@@ -377,8 +504,8 @@ class FeatureEngineer:
                 stock_id,
             )
 
-        # 移除高度共線特徵
-        selected = self._remove_collinear(df, selected, threshold=0.95)
+        # 移除高度共線特徵 (0.85: catches close~sma, bb_upper~close, etc.)
+        selected = self._remove_collinear(df, selected, threshold=0.85)
 
         logger.info(
             "特徵篩選: %d → %d (%s): %s",
@@ -476,11 +603,29 @@ class FeatureEngineer:
         feature_names: list[str],
         max_features: int,
     ) -> list[str]:
-        """用 Mutual Information 篩選特徵"""
-        from sklearn.feature_selection import mutual_info_regression
+        """Feature selection using f_regression (more robust than MI on small samples).
 
-        mi_scores = mutual_info_regression(X, y, random_state=42)
-        ranked_idx = np.argsort(mi_scores)[::-1][:max_features]
+        MI needs ~500+ samples to be reliable; f_regression works with ~200+.
+        Falls back to MI for larger datasets.
+        """
+        n_samples = len(y)
+        if n_samples < 500:
+            from sklearn.feature_selection import f_regression
+
+            f_scores, p_values = f_regression(X, y)
+            # Replace NaN scores (constant features) with 0
+            f_scores = np.nan_to_num(f_scores, nan=0.0)
+            ranked_idx = np.argsort(f_scores)[::-1][:max_features]
+            logger.info(
+                "Feature selection: f_regression (n=%d < 500), top p-values: %s",
+                n_samples,
+                [f"{p_values[i]:.4f}" for i in ranked_idx[:5]],
+            )
+        else:
+            from sklearn.feature_selection import mutual_info_regression
+
+            mi_scores = mutual_info_regression(X, y, random_state=42)
+            ranked_idx = np.argsort(mi_scores)[::-1][:max_features]
         return [feature_names[i] for i in ranked_idx]
 
     def _select_by_shap(
@@ -617,6 +762,15 @@ class FeatureEngineer:
 
         if weight_col is not None:
             w = valid[weight_col].values if weight_col in valid.columns else None
+            # Re-normalize weights to mean=1.0 after dropna removed NaN-label rows
+            # (which had weight=0). Without this, mean≈0.68 breaks XGBoost
+            # min_child_weight thresholds.
+            if w is not None and len(w) > 0:
+                w_pos = w[w > 0]
+                if len(w_pos) > 0:
+                    w_mean = w_pos.mean()
+                    if w_mean > 0 and abs(w_mean - 1.0) > 0.01:
+                        w = w * (1.0 / w_mean)
             return X, y, w
 
         return X, y
