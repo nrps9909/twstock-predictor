@@ -53,3 +53,4 @@ out/
 
 # uv
 .python-version
+pytest_*.txt
