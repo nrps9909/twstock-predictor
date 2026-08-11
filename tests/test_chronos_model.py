@@ -55,7 +55,7 @@ class TestChronosPredictor:
     def test_init_defaults(self):
         pred = ChronosPredictor.__new__(ChronosPredictor)
         pred.__init__()
-        assert pred.model_id == "amazon/chronos-bolt-small"
+        assert pred.model_id == "amazon/chronos-t5-small"
         assert pred.context_length == 64
         assert pred.prediction_length == 1
         assert pred.pipeline is None

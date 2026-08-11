@@ -539,7 +539,7 @@ class TestFundamentalValue:
         assert result.score > 0.5  # High ROE + good dividend
 
     def test_no_yfinance(self):
-        result = _compute_fundamental_value("9999")
+        result = _compute_fundamental_value("9999", fundamental_data={"info": {}})
         assert 0.0 <= result.score <= 1.0
 
 
@@ -847,7 +847,16 @@ class TestSectorAggregates:
             "2881": {"foreign_cumulative": -2000, "trust_cumulative": -1000},
             "2882": {"foreign_cumulative": -1000, "trust_cumulative": 500},
         }
-        result = _compute_sector_aggregates(stock_dfs, trust_lookup)
+        with (
+            patch("api.services.market_service.get_data_cache", return_value=None),
+            patch(
+                "api.services.market_service.get_data_cache_latest",
+                return_value=None,
+            ),
+            patch("api.services.market_service.TWSEScanner") as mock_scanner,
+        ):
+            mock_scanner.return_value.fetch_industry_indices.return_value = {}
+            result = _compute_sector_aggregates(stock_dfs, trust_lookup)
 
         # Should have semiconductor, finance, other, and _market_avg
         assert "semiconductor" in result
