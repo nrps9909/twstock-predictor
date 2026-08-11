@@ -248,7 +248,8 @@ cd web && npm run dev
 ### 測試
 
 ```bash
-.venv/Scripts/python -m pytest tests/ -v
+uv sync --locked --extra dev
+uv run --no-sync python -m pytest tests -q
 ```
 
 ---
@@ -321,6 +322,12 @@ twstock-predictor/
 | 綠能 | 6488 環球晶、3481 群創 |
 
 > 可在 `STOCK_SECTOR` 字典中自行新增股票。
+
+---
+
+## 參與貢獻與安全回報
+
+提交 Issue 或 Pull Request 前，請先閱讀 [CONTRIBUTING.md](CONTRIBUTING.md)。若發現可能造成未授權存取、資料外洩或供應鏈風險的漏洞，請依 [SECURITY.md](SECURITY.md) 使用 GitHub 私人漏洞回報，避免公開敏感細節。
 
 ---
 

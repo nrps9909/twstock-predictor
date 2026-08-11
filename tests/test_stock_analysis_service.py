@@ -594,7 +594,14 @@ class TestMLQualityTraining:
         mock_pred.signal = "buy"
         mock_pred.predicted_returns = np.array([0.02])
 
-        with patch("src.models.trainer.ModelTrainer") as MockTrainer:
+        with (
+            patch.object(service, "_ensure_training_data", return_value=1000),
+            patch(
+                "src.analysis.features.FeatureEngineer.build_features",
+                return_value=pd.DataFrame(),
+            ),
+            patch("src.models.trainer.ModelTrainer") as MockTrainer,
+        ):
             trainer_inst = MockTrainer.return_value
             # train_sector is called for stocks in STOCK_SECTOR (2330 = semiconductor)
             trainer_inst.train_sector.return_value = {
